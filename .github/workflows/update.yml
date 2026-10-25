@@ -1,26 +1,39 @@
-name: Update space pictures
+name: Update Earth over home
 
 on:
   schedule:
-    - cron: "30 2 * * *"   # every day at 02:30 UTC (08:00 in India)
-  workflow_dispatch:        # a "Run" button on GitHub, for testing
+    - cron: "*/30 * * * *"   # every 30 minutes (GitHub may start it a few minutes late)
+  workflow_dispatch:          # a "Run" button on GitHub, for testing
 
 permissions:
-  contents: write
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
 
 jobs:
   update:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - run: python make_feed.py nasa-space.csv
-      - name: Save the new list
-        run: |
-          git config user.name "space-feed bot"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add nasa-space.csv entries.json
-          git diff --cached --quiet || git commit -m "Update space pictures"
-          git push
+      - run: pip install pillow
+      - run: which ffmpeg || (sudo apt-get update && sudo apt-get install -y ffmpeg)
+      - name: Build the pictures and the video
+        env:
+          LAT: ${{ secrets.LAT }}       # the place is kept in hidden secrets, not in the code
+          LON: ${{ secrets.LON }}
+          PLACE: ${{ secrets.PLACE }}
+          BASE_URL: https://kaipipanwar.github.io/space-feed
+        run: python make_feed.py site
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+      - uses: actions/deploy-pages@v5

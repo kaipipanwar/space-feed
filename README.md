@@ -1,21 +1,20 @@
-# Space pictures for the TV screensaver
+# Earth over home, for the TV screensaver
 
-`entries.json` (and the same list as `nasa-space.csv`) is a list of real space pictures for the [Aerial Views](https://github.com/theothernt/AerialViews)
-screensaver on Android TV. A GitHub Action runs `make_feed.py` every day, so the list stays fresh.
+A feed for the [Aerial Views](https://github.com/theothernt/AerialViews) screensaver on Android TV that shows only
+the Earth over one place, as recent as possible. A GitHub Action runs `make_feed.py` every 30 minutes and publishes
+the result with GitHub Pages.
 
-- **Earth:** whole-Earth photos from NASA's EPIC camera on the DSCOVR satellite, 1.5 million km away.
-- **Webb:** the newest James Webb Space Telescope pictures from the ESA/Webb feed (CC BY 4.0, credit ESA/Webb).
-- **Mars:** rover and lander landscapes from the NASA Image Library (NASA/JPL-Caltech).
+- **Video:** a time-lapse of the last daylight hours from the EUMETSAT Meteosat satellite over the Indian Ocean
+  (a new picture every 15 minutes, about 30 minutes behind real time). At night it shows the last daylight hours.
+- **Photos:** the newest of those satellite pictures; the newest sharp daily pictures from NASA MODIS and VIIRS
+  (via NASA GIBS); NASA EPIC whole-Earth photos taken while the place faces the camera.
 
-Every caption names its source. The pictures stay on NASA's and ESA's servers; this list only points to them.
+Every caption names its source. The place is set with the repository secrets `LAT`, `LON` and `PLACE`.
 
 ## Use it
 
-In Aerial Views: Media Sources → Custom feeds → add the raw link to `entries.json`:
-`https://raw.githubusercontent.com/kaipipanwar/space-feed/main/entries.json`
-
-Use `entries.json`, not the `.csv`: Aerial Views 1.8.5 shows photo captions only from `entries.json`.
+In Aerial Views: Media Sources → Custom feeds → add `https://kaipipanwar.github.io/space-feed/entries.json`.
 
 ## Run it yourself
 
-`python make_feed.py nasa-space.csv` (Python 3, nothing to install).
+`LAT=.. LON=.. PLACE=.. python make_feed.py site` (Python 3, `pip install pillow`, and ffmpeg).
