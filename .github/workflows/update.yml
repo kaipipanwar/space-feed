@@ -25,12 +25,13 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install pillow
-      - run: which ffmpeg || (sudo apt-get update && sudo apt-get install -y ffmpeg)
+      - run: (which ffmpeg && fc-list | grep -q DejaVu) || (sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core)
       - name: Build the pictures and the video
         env:
           LAT: ${{ secrets.LAT }}       # the place is kept in hidden secrets, not in the code
           LON: ${{ secrets.LON }}
           PLACE: ${{ secrets.PLACE }}
+          NEWS: ${{ secrets.NEWS }}
           BASE_URL: https://kaipipanwar.github.io/space-feed
         run: python make_feed.py site
       - uses: actions/upload-pages-artifact@v5

@@ -4,15 +4,17 @@ Output folder (default "site"), published with GitHub Pages:
   entries.json   the list for the Aerial Views screensaver: one video and several photos.
   *.mp4, *.jpg   the media; every file name holds its time, so the TV never shows an old copy.
 
-What is in it (newest first in priority):
+What is in it:
   1. Video: time-lapse of the last daylight hours from the EUMETSAT Meteosat satellite over the Indian Ocean
      (a new picture every 15 minutes, about 30 minutes behind real time). No public live video exists.
   2. Photo: the newest of those satellite pictures, as a still.
   3. Photos: the newest sharp daily pictures from NASA's MODIS and VIIRS cameras (250-375 m per pixel).
   4. Photos: NASA EPIC whole-Earth photos taken while the place faces the camera.
+Every picture gets a scope crosshair on the place, an info panel (weather, air, sun, moon, earthquakes, the
+space station) and the local news along the bottom; in the video the news scrolls.
 
-The place comes from environment variables, so the exact spot is not written in the code:
-  LAT, LON  the centre (degrees);  PLACE  the name shown in the captions.
+The place comes from environment variables, so it is not written in the code:
+  LAT, LON  the centre (degrees);  PLACE  the name shown on screen;  NEWS  the news search (default: PLACE).
 
 Usage: LAT=.. LON=.. PLACE=.. python make_feed.py [output folder]
 Needs: Pillow (pip install pillow) and ffmpeg.
@@ -22,26 +24,29 @@ import json
 import math
 import os
 import re
-import shutil
 import subprocess
 import sys
-import tempfile
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from io import BytesIO
 
 from PIL import Image, ImageDraw, ImageFont, ImageStat
 
-USER_AGENT = "space-feed/2.0 (home TV screensaver)"
+USER_AGENT = "space-feed/3.0 (home TV screensaver)"
 IST = timezone(timedelta(hours=5, minutes=30))
-SIZE = (1920, 1080)
+SIZE = W, H = 1920, 1080
+CENTRE = (W // 2, H // 2)
 
 EUMETSAT_WMS = "https://view.eumetsat.int/geoserver/ows"
 EUMETSAT_LAYER = "msg_iodc:rgb_naturalenhncd"   # natural colour, Meteosat over the Indian Ocean, every 15 min
-SAT_SPAN = (7.0, 12.5)                           # degrees (lat, lon) of the satellite view: sharp enough at 3 km
+SAT_SPAN = (18.0, 32.0)                          # degrees (lat, lon): wide enough to stay sharp at ~4 km per pixel
 SAT_FRAMES = 24                                  # 24 x 15 min = the last 6 daylight hours
 SUN_MIN = 8                                      # degrees: below this the colour picture is too dark
+HOLD, FADE, FPS = 1.6, 0.6, 25                   # video: seconds per satellite picture, cross-fade, frames per second
 
 GIBS_WMS = "https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi"
 # Daily sharp cameras, with their local pass time (hour) to sort the newest first.
@@ -55,11 +60,21 @@ DAILY_PHOTOS = 2                                 # newest daily pictures kept pe
 
 EPIC_MAX_OFFSET = 30                             # degrees of longitude between the photo centre and the place
 
+RED = (255, 48, 48)
+PANEL = (0, 0, 0, 150)
+TICKER_H, TICKER_SPEED = 64, 150                 # news strip height (px) and scroll speed (px per second)
+
+
+# ---------- small helpers ----------
 
 def get(url):
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=90) as resp:
         return resp.read()
+
+
+def get_json(url, params=None):
+    return json.loads(get(url + ("?" + urllib.parse.urlencode(params) if params else "")))
 
 
 def wms(base, params):
@@ -81,29 +96,218 @@ def sun_elevation(lat, lon, when):
                                   + math.cos(lat) * math.cos(decl) * math.cos(hour_angle)))
 
 
+def distance_km(lat1, lon1, lat2, lon2):
+    p1, p2, dl = math.radians(lat1), math.radians(lat2), math.radians(lon2 - lon1)
+    c = math.sin(p1) * math.sin(p2) + math.cos(p1) * math.cos(p2) * math.cos(dl)
+    return 6371 * math.acos(max(-1.0, min(1.0, c)))
+
+
 def black_share(img):
     return sum(img.convert("L").histogram()[:8]) / (img.width * img.height)
 
 
-def font(size):
-    for path in ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "C:/Windows/Fonts/segoeui.ttf"):
-        if os.path.exists(path):
-            return ImageFont.truetype(path, size)
+def font(size, bold=False):
+    names = ("DejaVuSans-Bold.ttf", "segoeuib.ttf") if bold else ("DejaVuSans.ttf", "segoeui.ttf")
+    for folder in ("/usr/share/fonts/truetype/dejavu/", "C:/Windows/Fonts/"):
+        for name in names:
+            if os.path.exists(folder + name):
+                return ImageFont.truetype(folder + name, size)
     return ImageFont.load_default(size)
 
 
-def label(img, text, marker=None):
-    """Write the time in the top-right corner and draw a small ring on the place."""
-    draw = ImageDraw.Draw(img)
-    f = font(40)
-    w = draw.textlength(text, font=f)
-    draw.text((SIZE[0] - w - 50, 40), text, font=f, fill="white", stroke_width=3, stroke_fill="black")
-    if marker:
-        x, y = marker
-        for r, colour in ((16, "black"), (14, "white")):
-            draw.ellipse((x - r, y - r, x + r, y + r), outline=colour, width=3)
-    return img
+def compass(deg):
+    return ("N NNE NE ENE E ESE SE SSE S SSW SW WSW W WNW NW NNW".split())[round(deg / 22.5) % 16]
 
+
+def aqi_name(v):
+    for limit, name in ((50, "good"), (100, "moderate"), (150, "unhealthy for some"), (200, "unhealthy"),
+                        (300, "very unhealthy")):
+        if v <= limit:
+            return name
+    return "hazardous"
+
+
+def moon(now):
+    """Moon phase from the mean lunar month (good to about half a day)."""
+    month = 29.530588
+    age = ((now - datetime(2000, 1, 6, 18, 14, tzinfo=timezone.utc)).total_seconds() / 86400) % month
+    lit = (1 - math.cos(2 * math.pi * age / month)) / 2
+    names = ("new moon", "waxing crescent", "first quarter", "waxing gibbous", "full moon", "waning gibbous",
+             "last quarter", "waning crescent")
+    return f"{names[int((age / month * 8 + 0.5) % 8)]}, {lit:.0%} lit"
+
+
+# ---------- facts about the place ----------
+
+def facts(lat, lon, now):
+    """Everything the info panel shows. A broken service only blanks its own line."""
+    out = {}
+    try:
+        wx = get_json("https://api.open-meteo.com/v1/forecast", {
+            "latitude": lat, "longitude": lon, "timezone": "Asia/Kolkata", "forecast_days": 1, "wind_speed_unit": "kmh",
+            "current": "temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,wind_direction_10m,"
+                       "cloud_cover,visibility,uv_index",
+            "daily": "sunrise,sunset,temperature_2m_max,temperature_2m_min,uv_index_max"})
+        c, d = wx["current"], wx["daily"]
+        out["elevation"] = wx.get("elevation")
+        out["weather"] = [
+            f"{c['temperature_2m']:.0f}°C, feels {c['apparent_temperature']:.0f}°C  (today {d['temperature_2m_min'][0]:.0f}"
+            f"–{d['temperature_2m_max'][0]:.0f}°C)",
+            f"Wind {c['wind_speed_10m']:.0f} km/h from {compass(c['wind_direction_10m'])} · humidity {c['relative_humidity_2m']:.0f}%",
+            f"Cloud {c['cloud_cover']:.0f}% · visibility {c['visibility'] / 1000:.0f} km",
+            f"UV now {c['uv_index']:.0f}, today's peak {d['uv_index_max'][0]:.0f}",
+            f"Sunrise {d['sunrise'][0][-5:]} · sunset {d['sunset'][0][-5:]}"]
+    except Exception as e:
+        print(f"  weather failed ({e})")
+    try:
+        air = get_json("https://air-quality-api.open-meteo.com/v1/air-quality",
+                       {"latitude": lat, "longitude": lon, "current": "us_aqi,pm2_5"})["current"]
+        out["air"] = f"Air: AQI {air['us_aqi']:.0f} ({aqi_name(air['us_aqi'])}) · PM2.5 {air['pm2_5']:.0f} µg/m³"
+    except Exception as e:
+        print(f"  air failed ({e})")
+    out["moon"] = f"Moon: {moon(now)}"
+    try:
+        quakes = get_json("https://earthquake.usgs.gov/fdsnws/event/1/query", {
+            "format": "geojson", "latitude": lat, "longitude": lon, "maxradiuskm": 500, "minmagnitude": 2.5,
+            "starttime": (now - timedelta(days=7)).strftime("%Y-%m-%d")})["features"]
+        if quakes:
+            big = max(quakes, key=lambda q: q["properties"]["mag"])
+            qlon, qlat = big["geometry"]["coordinates"][:2]
+            out["quakes"] = (f"Earthquakes, 500 km, 7 days: {len(quakes)} (biggest M{big['properties']['mag']:.1f}, "
+                             f"{distance_km(lat, lon, qlat, qlon):.0f} km away)")
+        else:
+            out["quakes"] = "Earthquakes, 500 km, 7 days: none"
+    except Exception as e:
+        print(f"  earthquakes failed ({e})")
+    try:
+        iss = get_json("https://api.wheretheiss.at/v1/satellites/25544")
+        out["iss"] = f"Space station: {distance_km(lat, lon, iss['latitude'], iss['longitude']):,.0f} km away"
+    except Exception as e:
+        print(f"  space station failed ({e})")
+    return out
+
+
+def news(search, now):
+    """Newest local headlines from Google News (English, India), last 3 days."""
+    try:
+        rss = get("https://news.google.com/rss/search?" + urllib.parse.urlencode(
+            {"q": search, "hl": "en-IN", "gl": "IN", "ceid": "IN:en"}))
+        items = []
+        for it in ET.fromstring(rss).iter("item"):
+            title = re.sub(r"\s+", " ", it.findtext("title", "")).strip()
+            when = parsedate_to_datetime(it.findtext("pubDate"))
+            if title and now - when < timedelta(days=3) and all(ord(ch) < 0x2E80 for ch in title):
+                items.append((when, title))
+        items.sort(reverse=True)
+        return [f"{when.astimezone(IST):%d %b %H:%M}  {title}" for when, title in items[:12]]
+    except Exception as e:
+        print(f"  news failed ({e})")
+        return []
+
+
+# ---------- drawing ----------
+
+def crosshair(layer, x, y, scale=1.0):
+    """A duplex rifle-scope reticle: thick posts outside, thin lines inside, a gap and dot in the middle."""
+    d = ImageDraw.Draw(layer)
+    ring, gap = int(300 * scale), int(26 * scale)
+    shadow, red = (0, 0, 0, 110), RED + (190,)
+    for colour, grow in ((shadow, 2), (red, 0)):
+        thick, thin = 4 + grow, 2 + grow
+        for sx, sy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            far = 2000
+            d.line((x + sx * ring, y + sy * ring, x + sx * far, y + sy * far), fill=colour, width=thick)
+            d.line((x + sx * gap, y + sy * gap, x + sx * ring, y + sy * ring), fill=colour, width=thin)
+            for k in range(1, 5):  # range marks, like mil-dots
+                r = gap + k * (ring - gap) // 5
+                if sx:
+                    d.line((x + sx * r, y - 9 * scale, x + sx * r, y + 9 * scale), fill=colour, width=thin)
+                else:
+                    d.line((x - 9 * scale, y + sy * r, x + 9 * scale, y + sy * r), fill=colour, width=thin)
+        d.ellipse((x - ring, y - ring, x + ring, y + ring), outline=colour, width=thin)
+        d.ellipse((x - 4 - grow, y - 4 - grow, x + 4 + grow, y + 4 + grow), fill=colour)
+
+
+def hud(place, lat, lon, info, source, target=CENTRE, scale=1.0):
+    """The parts that stay still: crosshair, coordinates and the info panel (one transparent layer)."""
+    layer = Image.new("RGBA", SIZE, (0, 0, 0, 0))
+    crosshair(layer, *target, scale)
+    d = ImageDraw.Draw(layer)
+    ns, ew = "N" if lat >= 0 else "S", "E" if lon >= 0 else "W"
+    tag = f"{abs(lat):.2f}°{ns} {abs(lon):.2f}°{ew}"
+    if info.get("elevation") is not None:
+        tag += f" · {info['elevation']:.0f} m"
+    d.text((target[0] + 22, target[1] - 52), tag, font=font(28, True), fill=RED, stroke_width=3, stroke_fill="black")
+
+    lines = [(place.upper(), font(40, True)), (tag, font(26)), (source, font(24))]
+    # (the top-right corner stays free for the TV's own clock)
+    body = info.get("weather", []) + [info[k] for k in ("air", "moon", "quakes", "iss") if k in info]
+    lines += [(text, font(26)) for text in body]
+    x0, y0, pad, gap = 40, 36, 22, 10
+    height = sum(f.size + gap for _, f in lines) + 2 * pad + 8
+    width = max(d.textlength(t, font=f) for t, f in lines) + 2 * pad
+    d.rounded_rectangle((x0, y0, x0 + width, y0 + height), radius=14, fill=PANEL)
+    d.line((x0 + pad, y0 + pad + 40 + 26 + 24 + 3 * gap + 4, x0 + width - pad, y0 + pad + 40 + 26 + 24 + 3 * gap + 4),
+           fill=RED + (200,), width=2)
+    y = y0 + pad
+    for i, (text, f) in enumerate(lines):
+        if i == 3:
+            y += 8
+        d.text((x0 + pad, y), text, font=f, fill=RED if i == 0 else "white")
+        y += f.size + gap
+    layer.time_xy = (x0 + 4, int(y0 + height + 16))
+    return layer
+
+
+def ticker_strip(headlines):
+    """One long image of all headlines, for the scrolling news line in the video."""
+    f = font(30)
+    text = "      •      ".join(headlines) + "      •      "
+    width = int(ImageDraw.Draw(Image.new("RGB", (1, 1))).textlength(text, font=f)) + 1
+    strip = Image.new("RGB", (width, TICKER_H), (12, 12, 12))
+    ImageDraw.Draw(strip).text((0, (TICKER_H - 36) // 2), text, font=f, fill="white")
+    return strip
+
+
+def news_label(img, place):
+    """The red "<PLACE> NEWS" box at the left of the news line; returns where the headlines may start."""
+    d = ImageDraw.Draw(img)
+    f = font(28, True)
+    label = f"{place.upper()} NEWS"
+    width = int(d.textlength(label, font=f)) + 40
+    d.rectangle((0, H - TICKER_H, width, H), fill=(190, 20, 20))
+    d.text((20, H - TICKER_H + (TICKER_H - 34) // 2), label, font=f, fill="white")
+    return width
+
+
+def still_news(img, place, headlines):
+    """News line for photos: the newest headline (photos cannot scroll)."""
+    ImageDraw.Draw(img).rectangle((0, H - TICKER_H, W, H), fill=(12, 12, 12))
+    start = news_label(img, place)
+    if headlines:
+        f = font(30)
+        text = headlines[0]
+        d = ImageDraw.Draw(img)
+        while d.textlength(text, font=f) > W - start - 40 and len(text) > 10:
+            text = text[:-2]
+        if text != headlines[0]:
+            text = text.rstrip() + "…"
+        d.text((start + 20, H - TICKER_H + (TICKER_H - 36) // 2), text, font=f, fill="white")
+
+
+def picture_time(img, text, xy):
+    """When the picture was taken, just under the info panel."""
+    ImageDraw.Draw(img).text(xy, text, font=font(40, True), fill="white", stroke_width=3, stroke_fill="black")
+
+
+def finish_photo(img, layer, place, headlines, when_text, path):
+    img = Image.alpha_composite(img.convert("RGBA"), layer).convert("RGB")
+    picture_time(img, when_text, layer.time_xy)
+    still_news(img, place, headlines)
+    img.save(path, quality=92)
+
+
+# ---------- the pictures ----------
 
 def satellite_times():
     """The 15-minute picture times, newest first, from the server's own list."""
@@ -114,52 +318,78 @@ def satellite_times():
     return [newest - timedelta(minutes=15 * i) for i in range(4 * 30)]
 
 
-def satellite(lat, lon, place, out, stamp):
+def satellite(lat, lon, place, info, headlines, out, stamp):
     times = [t for t in satellite_times() if sun_elevation(lat, lon, t) >= SUN_MIN][:SAT_FRAMES]
     times.reverse()  # oldest first, for the video
-    if not times:
-        return []
-    frames = tempfile.mkdtemp()
-    centre = (SIZE[0] // 2, SIZE[1] // 2)
-    count = 0
-    for t in times:
+
+    def fetch(t):
         try:
             raw = get(wms(EUMETSAT_WMS, {
                 "service": "WMS", "request": "GetMap", "version": "1.3.0", "layers": EUMETSAT_LAYER,
                 "styles": "", "crs": "EPSG:4326", "bbox": bbox(lat, lon, SAT_SPAN), "format": "image/jpeg",
-                "width": 640, "height": 360, "time": t.strftime("%Y-%m-%dT%H:%M:00Z")}))
-            img = Image.open(BytesIO(raw)).convert("RGB")
+                "width": W // 2, "height": H // 2, "time": t.strftime("%Y-%m-%dT%H:%M:00Z")}))
+            return Image.open(BytesIO(raw)).convert("RGB")
         except Exception as e:
             print(f"  frame {t:%H:%M} UTC failed ({e})")
-            continue
-        if black_share(img) > 0.2:
-            continue
-        # The satellite sees about 3 km per pixel: upscale smoothly instead of showing blocks.
-        img = label(img.resize(SIZE, Image.LANCZOS), f"{t.astimezone(IST):%d %b, %H:%M} IST", centre)
-        img.save(os.path.join(frames, f"f{count:03d}.jpg"), quality=92)
-        count += 1
-        last_time, last_img = t, img
-    if count == 0:
+
+    with ThreadPoolExecutor(6) as pool:  # the server is slow per picture, so ask for several at once
+        pictures = list(pool.map(fetch, times))
+    # ~4 km per pixel: upscale smoothly
+    frames = [(t, img.resize(SIZE, Image.LANCZOS)) for t, img in zip(times, pictures)
+              if img is not None and black_share(img) < 0.2]
+    if not frames:
         return []
-    items = []
-    first = times[0].astimezone(IST)
-    end = last_time.astimezone(IST)
+    source = "EUMETSAT Meteosat, every 15 minutes"
+    layer = hud(place, lat, lon, info, source)
+    # Each satellite picture with the still parts drawn on, then blended into the next one.
+    shown = []
+    for t, img in frames:
+        img = Image.alpha_composite(img.convert("RGBA"), layer).convert("RGB")
+        picture_time(img, f"{t.astimezone(IST):%d %b, %H:%M} IST", layer.time_xy)
+        shown.append(img)
+    strip = ticker_strip(headlines) if headlines else None
+    canvas = Image.new("RGB", SIZE)
+    start = news_label(canvas, place)
+    label = canvas.crop((0, H - TICKER_H, start, H))
+
     video = f"live-{stamp}.mp4"
-    # One satellite picture per second, blended into each other, then the newest held for 3 seconds.
-    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-framerate", "1", "-i", os.path.join(frames, "f%03d.jpg"),
-                    "-vf", "tpad=stop_mode=clone:stop_duration=3,minterpolate=fps=25:mi_mode=blend",
-                    "-c:v", "libx264", "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p",
-                    "-crf", "20", "-movflags", "+faststart", os.path.join(out, video)], check=True)
-    items.append(("video", video,
-                  f"{place} from space, {first:%H:%M} to {end:%H:%M} IST {end:%d %b}. EUMETSAT Meteosat"))
+    per = int(HOLD * FPS)
+    fade = int(FADE * FPS)
+    total = per * len(shown) + 3 * FPS  # the newest picture stays 3 seconds longer
+    ffmpeg = subprocess.Popen(
+        ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}",
+         "-r", str(FPS), "-i", "-", "-c:v", "libx264", "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p",
+         "-crf", "21", "-movflags", "+faststart", os.path.join(out, video)], stdin=subprocess.PIPE)
+    for n in range(total):
+        i, k = divmod(n, per)
+        if i >= len(shown) - 1:
+            frame = shown[-1].copy()
+        elif k >= per - fade:
+            frame = Image.blend(shown[i], shown[i + 1], (k - (per - fade) + 1) / (fade + 1))
+        else:
+            frame = shown[i].copy()
+        frame.paste((12, 12, 12), (0, H - TICKER_H, W, H))
+        if strip:
+            offset = int(n * TICKER_SPEED / FPS) % strip.width
+            window = strip.crop((offset, 0, offset + W - start, TICKER_H))
+            if offset + W - start > strip.width:  # wrap around to the first headline
+                window.paste(strip.crop((0, 0, offset + W - start - strip.width, TICKER_H)), (strip.width - offset, 0))
+            frame.paste(window, (start, H - TICKER_H))
+        frame.paste(label, (0, H - TICKER_H))
+        ffmpeg.stdin.write(frame.tobytes())
+    ffmpeg.stdin.close()
+    if ffmpeg.wait():
+        raise RuntimeError("ffmpeg failed")
+
+    first, end = frames[0][0].astimezone(IST), frames[-1][0].astimezone(IST)
+    items = [("video", video, f"{place} from space, {first:%H:%M} to {end:%H:%M} IST {end:%d %b}. EUMETSAT Meteosat")]
     still = f"sat-{stamp}.jpg"
-    last_img.save(os.path.join(out, still), quality=92)
+    finish_photo(frames[-1][1], layer, place, headlines, f"{end:%d %b, %H:%M} IST", os.path.join(out, still))
     items.append(("photo", still, f"{place} from space, {end:%d %b %H:%M} IST. EUMETSAT Meteosat, newest picture"))
-    shutil.rmtree(frames)
     return items
 
 
-def daily(lat, lon, place, out, stamp):
+def daily(lat, lon, place, info, headlines, out, stamp):
     """Newest sharp daily pictures (MODIS/VIIRS), checked for gaps between the satellite's stripes."""
     today = datetime.now(timezone.utc).date()
     items = []
@@ -173,7 +403,7 @@ def daily(lat, lon, place, out, stamp):
                 raw = get(wms(GIBS_WMS, {
                     "SERVICE": "WMS", "REQUEST": "GetMap", "VERSION": "1.3.0", "LAYERS": layer, "CRS": "EPSG:4326",
                     "BBOX": bbox(lat, lon, (span_lat, span_lon)), "FORMAT": "image/jpeg",
-                    "WIDTH": SIZE[0], "HEIGHT": SIZE[1], "TIME": day.isoformat()}))
+                    "WIDTH": W, "HEIGHT": H, "TIME": day.isoformat()}))
                 img = Image.open(BytesIO(raw)).convert("RGB")
             except Exception as e:
                 print(f"  {layer} {day} failed ({e})")
@@ -181,7 +411,8 @@ def daily(lat, lon, place, out, stamp):
             if black_share(img) > 0.01 or ImageStat.Stat(img).mean[0] > 235:  # gap, or all cloud/no data
                 continue
             file = f"{name}-{day:%Y%m%d}-{layer.split('_')[0].lower()}-{kept}-{stamp}.jpg"
-            label(img, f"{day:%d %b %Y}", (SIZE[0] // 2, SIZE[1] // 2)).save(os.path.join(out, file), quality=92)
+            finish_photo(img, hud(place, lat, lon, info, f"{title}, {day:%d %b %Y}"), place, headlines,
+                         f"{day:%d %b %Y}", os.path.join(out, file))
             items.append(("photo", file, f"{place}, {day:%d %b %Y}. {title}"))
             kept += 1
             if kept == DAILY_PHOTOS:
@@ -189,16 +420,38 @@ def daily(lat, lon, place, out, stamp):
     return items
 
 
-def epic(lat, lon, place):
+def on_globe(img, lat, lon, centre_lat, centre_lon):
+    """Where the place is on a whole-Earth photo: find the disc, then project the place onto it."""
+    gray = img.convert("L").point(lambda p: 255 if p > 20 else 0)
+    left, top, right, bottom = gray.getbbox()
+    cx, cy, r = (left + right) / 2, (top + bottom) / 2, max(right - left, bottom - top) / 2
+    p, p0, dl = math.radians(lat), math.radians(centre_lat), math.radians(lon - centre_lon)
+    x = math.cos(p) * math.sin(dl)
+    y = math.cos(p0) * math.sin(p) - math.sin(p0) * math.cos(p) * math.cos(dl)
+    return cx + r * x, cy - r * y
+
+
+def epic(lat, lon, place, info, headlines, out, stamp):
     """NASA EPIC whole-Earth photos from the newest day, taken while the place faced the camera."""
-    photos = json.loads(get("https://epic.gsfc.nasa.gov/api/natural"))
+    photos = get_json("https://epic.gsfc.nasa.gov/api/natural")
     near = [p for p in photos if abs((p["centroid_coordinates"]["lon"] - lon + 180) % 360 - 180) <= EPIC_MAX_OFFSET]
     items = []
-    for p in near:
+    for n, p in enumerate(near):
         taken = datetime.strptime(p["date"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
         url = f"https://epic.gsfc.nasa.gov/archive/natural/{taken:%Y/%m/%d}/jpg/{p['image']}.jpg"
-        items.append(("photo", url, f"Earth facing {place}, {taken.astimezone(IST):%d %b %H:%M} IST, from "
-                                    "1.5 million km. NASA EPIC camera, DSCOVR"))
+        globe = Image.open(BytesIO(get(url))).convert("RGB")
+        # Fit the round photo into the 16:9 screen, on black, with room for the panel on the left.
+        side = H - TICKER_H - 20
+        globe = globe.resize((side, side), Image.LANCZOS)
+        img = Image.new("RGB", SIZE)
+        left = W - side - 120
+        img.paste(globe, (left, 10))
+        x, y = on_globe(globe, lat, lon, p["centroid_coordinates"]["lat"], p["centroid_coordinates"]["lon"])
+        file = f"globe-{taken:%Y%m%d%H%M}-{stamp}.jpg"
+        layer = hud(place, lat, lon, info, "NASA EPIC camera, 1.5 million km away", (int(left + x), int(10 + y)), 0.35)
+        finish_photo(img, layer, place, headlines, f"{taken.astimezone(IST):%d %b, %H:%M} IST", os.path.join(out, file))
+        items.append(("photo", file, f"Earth facing {place}, {taken.astimezone(IST):%d %b %H:%M} IST, from "
+                                     "1.5 million km. NASA EPIC camera, DSCOVR"))
     return items
 
 
@@ -207,13 +460,15 @@ def main():
     lat, lon, place = float(os.environ["LAT"]), float(os.environ["LON"]), os.environ.get("PLACE", "Home")
     base = os.environ.get("BASE_URL", "").rstrip("/")  # where the site will live; empty = relative names
     os.makedirs(out, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M")
+    now = datetime.now(timezone.utc)
+    stamp = now.strftime("%Y%m%d%H%M")
+    info = facts(lat, lon, now)
+    headlines = news(os.environ.get("NEWS") or place, now)
+    print(f"Facts: {len(info)} groups, news: {len(headlines)} headlines")
     items = []
-    for name, source in (("Satellite", lambda: satellite(lat, lon, place, out, stamp)),
-                         ("Daily", lambda: daily(lat, lon, place, out, stamp)),
-                         ("EPIC", lambda: epic(lat, lon, place))):
+    for name, source in (("Satellite", satellite), ("Daily", daily), ("EPIC", epic)):
         try:
-            found = source()
+            found = source(lat, lon, place, info, headlines, out, stamp)
         except Exception as e:  # one broken service must not empty the whole list
             print(f"{name}: failed ({e})")
             continue

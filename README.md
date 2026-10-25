@@ -9,7 +9,10 @@ the result with GitHub Pages.
 - **Photos:** the newest of those satellite pictures; the newest sharp daily pictures from NASA MODIS and VIIRS
   (via NASA GIBS); NASA EPIC whole-Earth photos taken while the place faces the camera.
 
-Every caption names its source. The place is set with the repository secrets `LAT`, `LON` and `PLACE`.
+Every picture has a scope crosshair on the place, an info panel (weather, air quality, UV, sun, Moon, nearby
+earthquakes, the space station; from Open-Meteo, USGS and wheretheiss.at) and the local news from Google News along
+the bottom (scrolling in the video). The place is set with the repository secrets `LAT`, `LON`, `PLACE` and
+`NEWS` (the news search).
 
 ## Use it
 
