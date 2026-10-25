@@ -633,9 +633,15 @@ $('setupGps').addEventListener('click', () => navigator.geolocation.getCurrentPo
 
 // ---------- start ----------
 
+// TV browsers can report their real size a moment after the page starts, so this runs on every frame
+// and only changes the scale when the size has changed.
+let fitted = '';
 function fitScreen() {
-  const s = Math.min(innerWidth / W, innerHeight / H);
-  $('screen').style.transform = `translate(${(innerWidth - W * s) / 2}px, ${(innerHeight - H * s) / 2}px) scale(${s})`;
+  const vw = document.documentElement.clientWidth || innerWidth, vh = document.documentElement.clientHeight || innerHeight;
+  if (`${vw}x${vh}` === fitted) return;
+  fitted = `${vw}x${vh}`;
+  const s = Math.min(vw / W, vh / H);
+  $('screen').style.transform = `translate(${(vw - W * s) / 2}px, ${(vh - H * s) / 2}px) scale(${s})`;
 }
 
 async function start(place) {
@@ -652,7 +658,7 @@ async function boot() {
   fitScreen();
   addEventListener('resize', fitScreen);
   let last = performance.now();
-  const frame = (now) => { scrollNews(now - last); last = now; requestAnimationFrame(frame); };
+  const frame = (now) => { fitScreen(); scrollNews(now - last); last = now; requestAnimationFrame(frame); };
   requestAnimationFrame(frame);
   setInterval(tickClock, 250);
   setInterval(() => { if (state.place) showData(); }, 10 * 60e3);                 // fresh data every 10 minutes

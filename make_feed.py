@@ -232,7 +232,7 @@ def news(search, now):
 # ---------- drawing ----------
 
 def crosshair(layer, x, y, scale=1.0):
-    """A duplex rifle-scope reticle: thick posts outside, thin lines inside, a gap and dot in the middle."""
+    """A rifle-scope reticle: thin lines inside the ring, fainter lines outside, a gap and a solid dot in the middle."""
     d = ImageDraw.Draw(layer)
     ring, gap = int(300 * scale), int(26 * scale)
     shadow, neon = (0, 0, 0, 25), NEON + (55,)
