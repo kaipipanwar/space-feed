@@ -22,6 +22,7 @@ from email.utils import parsedate_to_datetime
 USER_AGENT = "Mozilla/5.0 (space-feed news for a home TV)"
 MAX_AGE = timedelta(days=3)
 PER_LEVEL = 15
+PUBLISHED = os.environ.get("BASE_URL", "https://kaipipanwar.github.io/space-feed").rstrip("/") + "/news.json"
 WORLD_FEED = "https://feeds.bbci.co.uk/news/world/rss.xml"  # Bing answers broad searches with a web page, not RSS
 
 
@@ -30,10 +31,14 @@ def stories(search, now):
     words = re.sub(r'-("[^"]+"|\S+)', "", search).strip()  # Bing's own minus filter drops too much
     url = WORLD_FEED if search == "world news" else "https://www.bing.com/news/search?" + urllib.parse.urlencode(
         {"q": words, "format": "rss", "setlang": "en-IN"})
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        root = ET.fromstring(resp.read())
     found = []
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            root = ET.fromstring(resp.read())
+    except Exception as e:  # Bing sometimes turns GitHub's servers away: Google News still gives headlines
+        print(f"  {search}: summaries not available ({e})")
+        root = ET.fromstring("<rss/>")
     for it in root.iter("item"):
         title = html.unescape(re.sub(r"\s+", " ", it.findtext("title", ""))).strip()
         summary = html.unescape(re.sub(r"<[^>]+>|\s+", " ", it.findtext("description", ""))).strip()
@@ -66,12 +71,23 @@ def google_headlines(words, excluded, now, seen):
     return found
 
 
+def last_published():
+    """The stories of the last run, from the published site (empty if it cannot be read)."""
+    try:
+        req = urllib.request.Request(PUBLISHED, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.load(resp).get("levels", {})
+    except Exception:
+        return {}
+
+
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else "site"
     now = datetime.now(timezone.utc)
     place, state, country = (os.environ.get(k, "") for k in ("PLACE", "STATE", "COUNTRY"))
     searches = {"city": os.environ.get("NEWS") or place, "state": state, "country": country, "world": "world news"}
     feed = {"updated": now.isoformat(), "place": place, "state": state, "country": country, "levels": {}}
+    previous = last_published()
     for level, search in searches.items():
         if not search:
             continue
@@ -80,6 +96,9 @@ def main():
             print(f"{level}: {len(feed['levels'][level])} stories")
         except Exception as e:  # one failed search must not stop the others
             print(f"{level}: failed ({e})")
+        if not feed["levels"].get(level) and previous.get(level):   # keep the last good stories rather than none
+            feed["levels"][level] = previous[level]
+            print(f"{level}: kept {len(previous[level])} stories from the last run")
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(out, "news.json"), "w", encoding="utf-8", newline="\n") as f:
         json.dump(feed, f, ensure_ascii=False, indent=1)
