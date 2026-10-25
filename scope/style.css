@@ -1,0 +1,75 @@
+:root {
+  --neon: #39ff14;
+  --text: #c8ffd2;
+  --dim: #7fbf8c;
+  --panel: rgba(0, 0, 0, 0.6);
+  --line: rgba(57, 255, 20, 0.35);
+}
+
+html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+body { color: var(--text); font: 26px "Rajdhani", system-ui, sans-serif; }
+
+/* The fixed 1920 x 1080 screen, scaled by app.js to fit the window. */
+#screen { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; transform-origin: 0 0; overflow: hidden; }
+#stage, #stage img, #reticle { position: absolute; inset: 0; width: 1920px; height: 1080px; }
+#stage img { object-fit: fill; opacity: 0; transition: opacity 0.9s ease; image-rendering: auto; }
+#stage img.on { opacity: 1; }
+#stage img.contain { object-fit: contain; }
+
+.panel { position: absolute; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px 22px; }
+#info { left: 40px; top: 36px; min-width: 560px; max-width: 640px; }
+#side { right: 40px; top: 170px; width: 430px; }
+h1, h2 { margin: 0; color: var(--neon); font-weight: 700; letter-spacing: 2px; }
+h1 { font-size: 46px; line-height: 1; }
+h2 { font-size: 28px; margin-bottom: 8px; }
+.sub { font-size: 25px; margin-top: 4px; }
+.dim { color: var(--dim); }
+.rule { height: 1px; background: var(--neon); opacity: 0.6; margin: 12px 0; }
+.row { font-size: 25px; line-height: 1.35; }
+.mono, #sideRows .row { font-family: "Share Tech Mono", monospace; font-size: 22px; }
+#sideRows .row b { color: var(--neon); font-weight: normal; display: inline-block; width: 120px; }
+#frameTime { margin-top: 10px; font: 34px "Share Tech Mono", monospace; color: var(--neon); }
+
+/* Ground water gauge: one tube per soil depth. */
+#gauge { display: flex; gap: 14px; margin-top: 14px; align-items: flex-end; }
+.tube { width: 62px; text-align: center; font: 16px "Share Tech Mono", monospace; color: var(--dim); }
+.tube .glass { position: relative; height: 120px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin: 4px 0; }
+.tube .water { position: absolute; left: 0; right: 0; bottom: 0; background: linear-gradient(#2ad0ff, #0a6cff); transition: height 1.5s ease; }
+.tube .val { color: var(--text); }
+
+/* Animated clock: each digit slides when it changes. */
+#clock { position: absolute; right: 40px; top: 28px; text-align: right; }
+#time { font: 64px "Share Tech Mono", monospace; color: var(--neon); text-shadow: 0 0 12px rgba(57, 255, 20, 0.6); display: flex; justify-content: flex-end; }
+#time span { display: inline-block; min-width: 0.6em; text-align: center; }
+#time span.tick { animation: tick 0.45s ease; }
+@keyframes tick { from { transform: translateY(-40%); opacity: 0; } to { transform: none; opacity: 1; } }
+#date { font: 26px "Share Tech Mono", monospace; color: var(--text); letter-spacing: 2px; }
+
+/* Zoom ladder (up/down) and picture dots (left/right). */
+#ladder { position: absolute; right: 40px; bottom: 170px; text-align: right; font: 22px "Share Tech Mono", monospace; }
+#ladder div { color: var(--dim); padding: 2px 0; }
+#ladder div.on { color: #000; background: var(--neon); padding: 2px 10px; border-radius: 4px; }
+#views { position: absolute; left: 50%; bottom: 150px; transform: translateX(-50%); font: 22px "Share Tech Mono", monospace; color: var(--dim);
+  background: var(--panel); padding: 6px 16px; border-radius: 20px; }
+#views b { color: var(--neon); font-weight: normal; }
+#status { position: absolute; left: 40px; bottom: 150px; font: 18px "Share Tech Mono", monospace; color: var(--dim); }
+
+/* Bottom: a row of live numbers, then the scrolling news with summaries. */
+#dataLine { position: absolute; left: 0; right: 0; bottom: 64px; height: 56px; display: flex; gap: 0; background: rgba(0, 0, 0, 0.82);
+  border-top: 1px solid var(--line); font: 22px "Share Tech Mono", monospace; align-items: center; overflow: hidden; }
+#dataLine .tile { padding: 0 22px; border-right: 1px solid var(--line); white-space: nowrap; }
+#dataLine .tile b { color: var(--neon); font-weight: normal; margin-right: 8px; }
+#newsLine { position: absolute; left: 0; right: 0; bottom: 0; height: 64px; display: flex; background: #070707; }
+#newsLabel { background: var(--neon); color: #000; font: 700 26px "Rajdhani", sans-serif; padding: 0 20px; display: flex; align-items: center; white-space: nowrap; }
+#newsWindow { position: relative; flex: 1; overflow: hidden; }
+#newsText { position: absolute; top: 0; left: 0; white-space: nowrap; line-height: 64px; font-size: 28px; will-change: transform; }
+#newsText .t { color: #fff; font-weight: 700; }
+#newsText .s { color: var(--dim); }
+#newsText .h { color: var(--neon); font-family: "Share Tech Mono", monospace; }
+#newsText .sep { color: var(--neon); padding: 0 30px; }
+
+#setup { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); background: rgba(0, 0, 0, 0.92); border: 1px solid var(--neon);
+  border-radius: 16px; padding: 30px 40px; width: 760px; }
+#setup input, #setup button { font: 28px "Rajdhani", sans-serif; padding: 8px 14px; margin: 6px 6px 6px 0; background: #031; color: var(--text);
+  border: 1px solid var(--neon); border-radius: 8px; }
+#setup input { width: 380px; }

@@ -34,6 +34,15 @@ jobs:
           NEWS: ${{ secrets.NEWS }}
           BASE_URL: https://kaipipanwar.github.io/space-feed
         run: python make_feed.py site
+      - name: Collect the news and add the Earth Scope app
+        env:
+          PLACE: ${{ secrets.PLACE }}
+          STATE: ${{ secrets.STATE }}
+          COUNTRY: ${{ secrets.COUNTRY }}
+          NEWS: ${{ secrets.NEWS }}
+        run: |
+          python make_news.py site
+          cp -r scope site/scope
       - uses: actions/upload-pages-artifact@v5
         with:
           path: site
