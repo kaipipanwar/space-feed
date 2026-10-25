@@ -625,7 +625,14 @@ function countdown(when) {   // T-4d, T-36h, T-25m
 
 // ---------- local radio (Radio Browser) ----------
 
-// R (or play/pause on the remote) goes: off -> first station -> next station ... -> off.
+// Play/pause on the remote switches the radio on and off; R (or the remote's "next" key) goes to the next station.
+function toggleRadio() {
+  const audio = $('radio');
+  if (sky.radio >= 0 && !audio.paused) { audio.pause(); $('radioTag').hidden = true; return; }
+  if (sky.radio >= 0) { audio.play().catch(() => {}); $('radioTag').hidden = false; return; }
+  nextRadio();
+}
+
 async function nextRadio() {
   const audio = $('radio');
   if (!sky.stations.length) {
@@ -641,8 +648,8 @@ async function nextRadio() {
     }
     sky.stations = found.filter((x, i, all) => all.findIndex((y) => y.name === x.name) === i).slice(0, 12);
   }
-  sky.radio = sky.radio + 1 >= sky.stations.length ? -1 : sky.radio + 1;
-  if (sky.radio < 0) { audio.pause(); audio.removeAttribute('src'); $('radioTag').hidden = true; return; }
+  if (!sky.stations.length) { status('radio: no stations found for this place'); return; }
+  sky.radio = (sky.radio + 1) % sky.stations.length;
   const st = sky.stations[sky.radio];
   audio.src = st.url_resolved;
   // a station that does not play (e.g. a stream type this browser lacks) is skipped, at most once round the list
@@ -650,7 +657,7 @@ async function nextRadio() {
   audio.onplaying = () => { sky.radioFails = 0; };
   audio.play().catch(() => {});
   $('radioTag').hidden = false;
-  $('radioTag').textContent = `📻 ${st.name}${st.state ? ` · ${st.state}` : ''} · ${sky.radio + 1}/${sky.stations.length} · R / ⏯ next`;
+  $('radioTag').textContent = `📻 ${st.name}${st.state ? ` · ${st.state}` : ''} · ${sky.radio + 1}/${sky.stations.length} · ⏯ on/off · R ⏭ next`;
 }
 
 // ---------- the weather layer (OK / Enter) ----------
@@ -1185,7 +1192,8 @@ document.addEventListener('keydown', (e) => {
   else if (k === 'ArrowRight') goView(state.view + 1);
   else if (k === 'ArrowLeft') goView(state.view - 1);
   else if (k === 'Enter' || k === 'w' || k === 'W') toggleWeather();
-  else if (k === 'r' || k === 'R' || k === 'MediaPlayPause' || k === 'MediaPlay') nextRadio();
+  else if (k === 'MediaPlayPause' || k === 'MediaPlay' || k === 'MediaPause') toggleRadio();
+  else if (k === 'r' || k === 'R' || k === 'MediaTrackNext' || k === 'MediaFastForward') nextRadio();
   else if (k === 's' || k === 'S') { $('setup').hidden = false; $('setupCity').focus(); }
   else return;
   e.preventDefault();
