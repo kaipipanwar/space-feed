@@ -1,6 +1,8 @@
 // Earth Scope: the Earth over one place, seen through a scope, from the city out to the whole planet.
 // Keys (PC keyboard or TV remote): left/right = pictures, up = zoom out, down = zoom in, OK/Enter or W = weather
 // layer on/off, S = change place (and which way you face when you look at the screen, for the compass).
+// Levels: HERE (your exact spot, closest map + live traffic) -> city -> state -> country -> continent -> Earth.
+// Settings in the address, kept only in this browser: ?facing=<degrees> ?here=<lat>,<lon> ?tomtom=<free TomTom key>
 // All data comes from free public services that allow web pages to read them; news.json is made by the
 // GitHub Action (make_news.py), because news feeds do not allow that.
 'use strict';
@@ -8,7 +10,7 @@
 const W = 1920, H = 1080;
 const $ = (id) => document.getElementById(id);
 const NEON = '#39ff14';
-const LEVELS = ['city', 'state', 'country', 'continent', 'earth'];
+const LEVELS = ['here', 'city', 'state', 'country', 'continent', 'earth'];
 const CONTINENTS = {   // [south, west, north, east] boxes for the continent level
   Asia: [-12, 25, 72, 150], Europe: [34, -25, 72, 45], Africa: [-36, -20, 38, 55],
   'North America': [5, -170, 75, -50], 'South America': [-56, -85, 14, -33], Oceania: [-48, 110, 5, 180],
@@ -17,13 +19,17 @@ const CONTINENTS = {   // [south, west, north, east] boxes for the continent lev
 const EUMETSAT = 'https://view.eumetsat.int/geoserver/ows';
 const GIBS = 'https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi';
 const ESRI = 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export';
+// NASA's night camera (city lights and moonlit land), newest first
+const NIGHT = ['VIIRS_NOAA20_DayNightBand_At_Sensor_Radiance', 'VIIRS_NOAA21_DayNightBand_At_Sensor_Radiance',
+  'VIIRS_SNPP_DayNightBand_At_Sensor_Radiance'];
 
 const DAILY = ['MODIS_Terra_CorrectedReflectance_TrueColor', 'VIIRS_NOAA20_CorrectedReflectance_TrueColor',
   'VIIRS_SNPP_CorrectedReflectance_TrueColor', 'MODIS_Aqua_CorrectedReflectance_TrueColor'];
 const LOOP_FRAMES = 16, LOOP_STEP_MS = 1100, AUTO_VIEW_MS = 45000;
 
-const state = { place: null, level: 0, view: 0, boxes: {}, views: [], loop: null, news: null, data: {}, lastKey: 0, weather: false,
-  facing: null };   // the compass direction you face when you look at the screen (degrees), if known
+const state = { place: null, level: 1, view: 0, boxes: {}, views: [], loop: null, news: null, data: {}, lastKey: 0, weather: false,
+  facing: null,   // the compass direction you face when you look at the screen (degrees), if known
+  here: null };   // your exact spot { lat, lon, accuracy, source }, if known
 
 // ---------- small helpers ----------
 
@@ -142,6 +148,27 @@ async function describe(lat, lon, name) {
 
 function savePlace(p) { try { localStorage.setItem('earthscope.place', JSON.stringify(p)); } catch { /* fine */ } }
 
+// Your exact spot: from the address (?here=lat,lon, e.g. sent from the PC to the TV), from this device's location
+// (a phone, or a PC with location switched on), or from what this browser remembered. It never leaves the device.
+async function findHere() {
+  const param = (new URLSearchParams(location.search).get('here') || '').split(',').map(Number);
+  if (param.length === 2 && param.every(Number.isFinite)) return keepHere({ lat: param[0], lon: param[1], accuracy: null, source: 'set from the PC' });
+  const live = await new Promise((ok) => {
+    if (!navigator.geolocation) return ok(null);
+    navigator.geolocation.getCurrentPosition((pos) => ok({ lat: pos.coords.latitude, lon: pos.coords.longitude,
+      accuracy: pos.coords.accuracy, source: 'this device' }), () => ok(null), { timeout: 8000, maximumAge: 10 * 60e3 });
+  });
+  if (live) return keepHere(live);
+  try { return JSON.parse(localStorage.getItem('earthscope.here')); } catch { return null; }
+}
+
+function keepHere(h) { try { localStorage.setItem('earthscope.here', JSON.stringify(h)); } catch { /* fine */ } return h; }
+
+// The point the data and the scope are about at a level: your spot at HERE, the city centre elsewhere.
+function focus(level = LEVELS[state.level]) {
+  return level === 'here' && state.here ? state.here : state.place;
+}
+
 // The picture area of each level.
 async function levelBoxes(p) {
   const nom = async (params) => {
@@ -159,19 +186,25 @@ async function levelBoxes(p) {
 
 function levelTitle(level) {
   const p = state.place;
-  return { city: p.name, state: p.state, country: p.country, continent: p.continent, earth: 'Earth' }[level] || level;
+  return { here: 'Here', city: p.name, state: p.state, country: p.country, continent: p.continent, earth: 'Earth' }[level] || level;
 }
 
 // ---------- pictures ----------
 
 // Which weather satellite sees this longitude best, and whether it gives natural colour.
+// Which weather satellite sees this longitude best: a colour layer for day and an infrared layer that sees clouds
+// at night too.
 function geoSource(lon) {
-  if (lon >= 10 && lon <= 110) return { kind: 'eumetsat', layer: 'msg_iodc:rgb_naturalenhncd', name: 'EUMETSAT Meteosat (Indian Ocean)' };
-  if (lon >= -60 && lon < 10) return { kind: 'eumetsat', layer: 'msg_fes:rgb_naturalenhncd', name: 'EUMETSAT Meteosat (0°)' };
-  if (lon < -105 || lon > 170) return { kind: 'gibs', layer: 'GOES-West_ABI_GeoColor', name: 'NOAA GOES-West', step: 10 };
-  if (lon < -60) return { kind: 'gibs', layer: 'GOES-East_ABI_GeoColor', name: 'NOAA GOES-East', step: 10 };
-  return { kind: 'gibs', layer: 'Himawari_AHI_Band3_Red_Visible_1km', name: 'JMA Himawari (visible, grey)', step: 10 };
+  if (lon >= 10 && lon <= 110) return { kind: 'eumetsat', layer: 'msg_iodc:rgb_naturalenhncd', night: 'msg_iodc:ir108', name: 'EUMETSAT Meteosat (Indian Ocean)' };
+  if (lon >= -60 && lon < 10) return { kind: 'eumetsat', layer: 'msg_fes:rgb_naturalenhncd', night: 'msg_fes:ir108', name: 'EUMETSAT Meteosat (0°)' };
+  if (lon < -105 || lon > 170) return { kind: 'gibs', layer: 'GOES-West_ABI_GeoColor', night: 'GOES-West_ABI_GeoColor', name: 'NOAA GOES-West', step: 10 };
+  if (lon < -60) return { kind: 'gibs', layer: 'GOES-East_ABI_GeoColor', night: 'GOES-East_ABI_GeoColor', name: 'NOAA GOES-East', step: 10 };
+  return { kind: 'gibs', layer: 'Himawari_AHI_Band3_Red_Visible_1km', night: 'Himawari_AHI_Band13_Clean_Infrared', name: 'JMA Himawari', step: 10 };
 }
+
+// Day or night for a picture: colour only when the sun is up over the whole view (both edges), else infrared, so
+// no half-dark sunset pictures.
+const isDay = (box, t) => [box[1], box[3]].every((lon) => sunPosition((box[0] + box[2]) / 2, lon, t).el >= 3);
 
 let capsCache = null;
 async function newestEumetsat(layer) {
@@ -185,38 +218,34 @@ async function newestEumetsat(layer) {
 }
 
 // The newest daylight picture times for a box (oldest first), searching back up to 30 hours.
+// The newest picture times for a box (oldest first): day and night alike, so the loop is always the latest.
 async function loopTimes(box, src) {
-  const cLat = (box[0] + box[2]) / 2, cLon = (box[1] + box[3]) / 2;
   const step = (src.step || 15) * 60e3;
-  let newest = src.kind === 'eumetsat' ? await newestEumetsat(src.layer)
+  const newest = src.kind === 'eumetsat' ? await newestEumetsat(src.layer)
     : new Date(Math.floor((Date.now() - 50 * 60e3) / step) * step);
   const times = [];
-  for (let t = newest.getTime(); times.length < LOOP_FRAMES && t > newest - 30 * 3600e3; t -= step) {
-    // the sun must be up over the whole view, not just its middle (no half-dark sunset pictures)
-    const at = new Date(t);
-    if ([box[1], cLon, box[3]].every((lon) => sunPosition(cLat, lon, at).el >= 8)) times.push(at);
-  }
-  return times.reverse();
+  for (let k = LOOP_FRAMES - 1; k >= 0; k--) times.push(new Date(newest.getTime() - k * step));
+  return times;
 }
 
 function geoUrl(box, src, time, width, height) {
-  const t = time.toISOString().slice(0, 16) + ':00Z';
+  const t = time.toISOString().slice(0, 16) + ':00Z', layer = isDay(box, time) ? src.layer : src.night;
   if (src.kind === 'eumetsat') {
-    return `${EUMETSAT}?${qs({ service: 'WMS', request: 'GetMap', version: '1.3.0', layers: src.layer, styles: '', crs: 'EPSG:4326',
+    return `${EUMETSAT}?${qs({ service: 'WMS', request: 'GetMap', version: '1.3.0', layers: layer, styles: '', crs: 'EPSG:4326',
       bbox: wmsBox(box), format: 'image/jpeg', width, height, time: t })}`;
   }
-  return `${GIBS}?${qs({ SERVICE: 'WMS', REQUEST: 'GetMap', VERSION: '1.3.0', LAYERS: src.layer, CRS: 'EPSG:4326',
+  return `${GIBS}?${qs({ SERVICE: 'WMS', REQUEST: 'GetMap', VERSION: '1.3.0', LAYERS: layer, CRS: 'EPSG:4326',
     BBOX: wmsBox(box), FORMAT: 'image/jpeg', WIDTH: width, HEIGHT: height, TIME: t })}`;
 }
 
 const loadImage = (src) => new Promise((ok, fail) => { const i = new Image(); i.crossOrigin = 'anonymous'; i.onload = () => ok(i); i.onerror = fail; i.src = src; });
 
 // Share of black pixels: gaps between a satellite's stripes, or night.
-function blackShare(img) {
+function blackShare(img, limit = 24) {
   const c = document.createElement('canvas'); c.width = 96; c.height = 54;
   const g = c.getContext('2d'); g.drawImage(img, 0, 0, 96, 54);
   const d = g.getImageData(0, 0, 96, 54).data; let black = 0;
-  for (let i = 0; i < d.length; i += 4) if (d[i] + d[i + 1] + d[i + 2] < 24) black++;
+  for (let i = 0; i < d.length; i += 4) if (d[i] + d[i + 1] + d[i + 2] < limit) black++;
   return black / (96 * 54);
 }
 
@@ -229,6 +258,22 @@ async function newestDaily(box, maxGap) {
         BBOX: wmsBox(box), FORMAT: 'image/jpeg', WIDTH: w, HEIGHT: h, TIME: day })}`;
       try {
         if (blackShare(await loadImage(url(192, 108))) <= maxGap) return { url: url(W, H), day, layer };
+      } catch { /* try the next one */ }
+    }
+  }
+  return null;
+}
+
+// NASA's newest night photo of a box (city lights and moonlit land) without big gaps. Night photos are dark,
+// so only pixels with no data at all count as gaps.
+async function newestNight(box, maxGap) {
+  for (let back = 0; back < 4; back++) {
+    const day = new Date(Date.now() - back * 864e5).toISOString().slice(0, 10);
+    for (const layer of NIGHT) {
+      const url = (w, h) => `${GIBS}?${qs({ SERVICE: 'WMS', REQUEST: 'GetMap', VERSION: '1.3.0', LAYERS: layer, CRS: 'EPSG:4326',
+        BBOX: wmsBox(box), FORMAT: 'image/jpeg', WIDTH: w, HEIGHT: h, TIME: day })}`;
+      try {
+        if (blackShare(await loadImage(url(192, 108)), 2) <= maxGap) return { url: url(W, H), day, layer };
       } catch { /* try the next one */ }
     }
   }
@@ -256,7 +301,12 @@ function globeTarget(photo, p) {
 
 // The pictures (views) of a level; left/right moves between them.
 function viewsFor(level) {
-  const p = state.place, world = [-90, -180, 90, 180];
+  const p = state.place, f = focus(level), world = [-90, -180, 90, 180];
+  if (level === 'here') {
+    // The closest the map goes (about 450 m from top to bottom) and a little wider, both with live traffic.
+    return [{ kind: 'map', name: 'closest map + traffic', box: box16x9(f.lat, f.lon, 0.004), traffic: true },
+      { kind: 'map', name: 'neighbourhood + traffic', box: box16x9(f.lat, f.lon, 0.014), traffic: true }];
+  }
   if (level === 'earth') {
     return [{ kind: 'map', name: 'satellite map', box: world }, { kind: 'globe', name: 'whole Earth, NASA EPIC' },
       { kind: 'daily', name: 'world today', box: world, gap: 0.3 }];
@@ -264,11 +314,15 @@ function viewsFor(level) {
   const box = centreOn(state.boxes[level], p.lat, p.lon);
   // The sharp map (Esri World Imagery, the same map Trade Eye uses) comes first: very close at the city level.
   const map = { kind: 'map', name: 'satellite map', box: level === 'city' ? box16x9(p.lat, p.lon, 0.045) : box };
-  const views = [{ kind: 'loop', name: 'live loop', box }, { kind: 'still', name: 'newest picture', box }];
   const sharp = level === 'city' ? box16x9(p.lat, p.lon, 1.5) : box;
-  const daily = { kind: 'daily', name: 'sharpest today', box: sharp, gap: level === 'city' ? 0.01 : 0.08 };
-  // Small areas: the sharp daily picture before the loop (the 15-minute satellite is blocky this close).
-  return level === 'city' || level === 'state' ? [map, daily, ...views] : [map, ...views, daily];
+  const daily = { kind: 'daily', name: 'sharpest daytime', box: sharp, gap: level === 'city' ? 0.01 : 0.08 };
+  const night = { kind: 'night', name: 'night lights', box: sharp, gap: level === 'city' ? 0.02 : 0.1 };
+  // Then the newest first: the live loop and its newest picture, then the sharp daily photos, the most recent first
+  // (NASA's night pass is around 01:30 local time, its day pass around 10:30 to 13:30).
+  const hour = new Date().getUTCHours() + p.lon / 15;
+  const localHour = ((hour % 24) + 24) % 24;
+  const sharpOnes = localHour >= 2 && localHour < 11 ? [night, daily] : [daily, night];
+  return [map, { kind: 'loop', name: 'live loop', box }, { kind: 'still', name: 'newest picture', box }, ...sharpOnes];
 }
 
 // A whole-world picture with the place's longitude in the middle: two halves (the map services cannot wrap
@@ -298,6 +352,7 @@ async function showView() {
   renderViews();
   status('loading pictures …');
   drawWeather(null);
+  $('tiles').replaceChildren();
   try {
     if (view.kind === 'map') {
       setSource('Esri World Imagery · sharpest photos, months to years old (not live)');
@@ -308,8 +363,17 @@ async function showView() {
         showWorld(url);
       } else {
         setPicture(mapUrl(view.box, W, H));
-        drawReticle(CENTRE, level === 'city' ? 1 : 0.6);
+        drawReticle(CENTRE, level === 'city' || level === 'here' ? 1 : 0.6);
+        if (view.traffic) showTraffic(view.box);
       }
+    } else if (view.kind === 'night') {
+      const d = await newestNight(view.box, view.gap);
+      if (token !== showToken) return;
+      if (!d) throw new Error('no clear night photo in the last 4 days');
+      setSource(`NASA ${d.layer.split('_').slice(0, 2).join(' ')} night camera · night of ${d.day}`);
+      setFrameTime(null, `${d.day} night`);
+      setPicture(d.url);
+      drawReticle(onScreen(view.box, p.lat, p.lon), level === 'city' ? 1 : 0.6);
     } else if (view.kind === 'globe') {
       const g = await newestGlobe(p);
       if (token !== showToken) return;
@@ -339,12 +403,12 @@ async function showView() {
       const times = await loopTimes(view.box, src);
       if (token !== showToken) return;
       const target = onScreen(view.box, p.lat, p.lon);
-      setSource(`${src.name} · every ${src.step || 15} min`);
+      setSource(`${src.name} · every ${src.step || 15} min · colour by day, infrared by night`);
       drawReticle(target, level === 'city' ? 1 : 0.6);
       if (view.kind === 'still') {
         const t = times[times.length - 1];
         setPicture(geoUrl(view.box, src, t, W, H));
-        setFrameTime(t);
+        setFrameTime(t, null, isDay(view.box, t) ? '' : ' · infrared');
       } else {
         await startLoop(view.box, src, times, token);
       }
@@ -355,6 +419,44 @@ async function showView() {
     console.warn(e);
     status(`picture not available: ${e.message}`);
   }
+}
+
+// ---------- map tiles: live traffic (TomTom) and rain radar (RainViewer) ----------
+
+// Web map tiles (the usual 256-pixel squares) laid over a latitude/longitude box. Fine for the small and medium
+// areas they are used for; makeUrl(z, x, y) gives one tile.
+function tilesOver(box, maxZoom, makeUrl, layer) {
+  const [s, w, n, e] = box;
+  const z = Math.max(2, Math.min(maxZoom, Math.round(Math.log2(360 / (e - w) * W / 256))));
+  const N = 2 ** z, tx = (lon) => (lon + 180) / 360 * N;
+  const ty = (lat) => (1 - Math.log(Math.tan(rad(lat)) + 1 / Math.cos(rad(lat))) / Math.PI) / 2 * N;
+  const lonOf = (x) => x / N * 360 - 180, latOf = (y) => deg(Math.atan(Math.sinh(Math.PI * (1 - 2 * y / N))));
+  const out = [];
+  for (let x = Math.floor(tx(w)); x <= Math.floor(tx(e)); x++) {
+    for (let y = Math.floor(ty(Math.min(85, n))); y <= Math.floor(ty(Math.max(-85, s))); y++) {
+      if (out.length > 80) break;
+      const img = el('img', 'tile');
+      const left = (lonOf(x) - w) / (e - w) * W, right = (lonOf(x + 1) - w) / (e - w) * W;
+      const top = (n - latOf(y)) / (n - s) * H, bottom = (n - latOf(y + 1)) / (n - s) * H;
+      Object.assign(img.style, { left: `${left}px`, top: `${top}px`, width: `${right - left}px`, height: `${bottom - top}px` });
+      img.src = makeUrl(z, ((x % N) + N) % N, y);
+      out.push(img);
+    }
+  }
+  layer.replaceChildren(...out);
+}
+
+function tomtomKey() {
+  const param = new URLSearchParams(location.search).get('tomtom');
+  try { if (param) localStorage.setItem('earthscope.tomtom', param); return param || localStorage.getItem('earthscope.tomtom'); } catch { return param; }
+}
+
+// Live traffic: green flows, orange slows, red jams (TomTom, a free key kept only in this browser).
+function showTraffic(box) {
+  const key = tomtomKey();
+  if (!key) { status('traffic: needs a free TomTom key (see README)'); return; }
+  tilesOver(box, 18, (z, x, y) => `https://api.tomtom.com/traffic/map/4/tile/flow/relative0/${z}/${x}/${y}.png?tileSize=256&key=${encodeURIComponent(key)}`, $('tiles'));
+  setSource('Esri World Imagery (sharpest photos, not live) · live traffic © TomTom');
 }
 
 // ---------- the weather layer (OK / Enter) ----------
@@ -376,6 +478,7 @@ async function drawWeather(view) {
   cancelAnimationFrame(weatherRun);
   for (const id of ['weather', 'heat']) $(id).getContext('2d').clearRect(0, 0, W, H);
   rain.classList.remove('on');
+  $('radarTiles').replaceChildren();
   $('weatherTag').hidden = !view;
   if (!view) return;
   const level = LEVELS[state.level];
@@ -383,7 +486,14 @@ async function drawWeather(view) {
   // The live loop already shows the real clouds moving; the weather layer would only cover them.
   if (view.kind === 'loop') { $('weatherTag').textContent = 'WEATHER: the live loop shows the real clouds (← → for the weather layer)'; return; }
   const box = view.box;
-  $('weatherTag').innerHTML = 'WEATHER ON · <b>heat</b> <span class="scale"></span> · wind and rain: live · NASA rain map: a few hours old';
+  $('weatherTag').innerHTML = 'WEATHER ON · <b>heat</b> <span class="scale"></span> · wind: live model · rain: <span class="radar">radar …</span> + NASA (hours old)';
+  json('https://api.rainviewer.com/public/weather-maps.json').then((rv) => {
+    const f = rv?.radar?.past && last(rv.radar.past);
+    if (token !== weatherToken || !f) return;
+    tilesOver(box, 7, (z, x, y) => `${rv.host}${f.path}/256/${z}/${x}/${y}/2/1_1.png`, $('radarTiles'));
+    const at = new Date(f.time * 1000).toLocaleTimeString('en-GB', { timeZone: state.data.tz, hour: '2-digit', minute: '2-digit' });
+    $('weatherTag').querySelector('.radar').textContent = `RainViewer radar ${at}`;
+  }).catch(() => {});
   rain.onload = () => { if (token === weatherToken) rain.classList.add('on'); };
   rain.src = `${GIBS}?${qs({ SERVICE: 'WMS', REQUEST: 'GetMap', VERSION: '1.3.0', LAYERS: 'IMERG_Precipitation_Rate_30min', CRS: 'EPSG:4326',
     BBOX: wmsBox(box), FORMAT: 'image/png', TRANSPARENT: 'TRUE', WIDTH: W / 2, HEIGHT: H / 2 })}`;
@@ -493,7 +603,7 @@ async function startLoop(box, src, times, token) {
   // Show the newest picture at once; the server is slow, so the loop starts when all frames are in.
   const newest = times[times.length - 1];
   setPicture(geoUrl(box, src, newest, 960, 540));
-  setFrameTime(newest);
+  setFrameTime(newest, null, isDay(box, newest) ? '' : ' · infrared');
   status(`loading ${times.length} pictures for the loop …`);
   // Small pictures (the satellite sees ~4 km per pixel anyway).
   const frames = [];
@@ -506,7 +616,7 @@ async function startLoop(box, src, times, token) {
   const step = () => {
     const f = ok[i % ok.length];
     setPicture(f.img.src);
-    setFrameTime(f.t);
+    setFrameTime(f.t, null, isDay(box, f.t) ? '' : ' · infrared');
     i++;
   };
   step();
@@ -549,13 +659,14 @@ function drawReticle(target, scale) {
   g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H - 64); g.stroke();
   g.restore();
   g.fillStyle = NEON; g.font = '700 26px Rajdhani, sans-serif'; g.textAlign = 'center';
-  const tag = `▼ ${state.place.name.toUpperCase()}`;
+  const tag = `▼ ${LEVELS[state.level] === 'here' ? 'YOU' : state.place.name.toUpperCase()}`;
   g.fillText(tag, Math.max(120, Math.min(W - 120, x)), 26);
 
   // The solid centre dot and the coordinates.
   g.fillStyle = '#000'; g.beginPath(); g.arc(x, y, 7, 0, Math.PI * 2); g.fill();
   g.fillStyle = NEON; g.beginPath(); g.arc(x, y, 4.5, 0, Math.PI * 2); g.fill();
-  const p = state.place, lab = `${Math.abs(p.lat).toFixed(2)}°${p.lat >= 0 ? 'N' : 'S'} ${Math.abs(p.lon).toFixed(2)}°${p.lon >= 0 ? 'E' : 'W'}`
+  const p = focus(), digits = LEVELS[state.level] === 'here' ? 5 : 2;
+  const lab = `${Math.abs(p.lat).toFixed(digits)}°${p.lat >= 0 ? 'N' : 'S'} ${Math.abs(p.lon).toFixed(digits)}°${p.lon >= 0 ? 'E' : 'W'}`
     + (state.data.elevation != null ? ` · ${Math.round(state.data.elevation)} m` : '');
   g.font = '700 26px "Share Tech Mono", monospace'; g.textAlign = 'left';
   g.lineWidth = 4; g.strokeStyle = 'rgba(0,0,0,0.8)'; g.strokeText(lab, x + 20, y - 18);
@@ -594,6 +705,7 @@ async function cityData(p) {
       `Earthquakes ≤300 km, 30 days: ${quakes}`,
       iss ? `Space station: ${fmt(distanceKm(p.lat, p.lon, iss.latitude, iss.longitude))} km away, ${fmt(iss.altitude)} km up` : '',
       await kpLine(),
+      `Measured for ${c.time.slice(11)} local · weather model (Open-Meteo), 15-minute steps; no station reports here`,
     ].filter(Boolean),
     sideTitle: 'SCOPE DATA',
     side: [
@@ -624,12 +736,15 @@ async function kpLine() {
 
 // A tiny sky: the circle is the horizon, the middle is straight overhead, north is up; the dot is the sun or moon
 // (hollow when it is below the horizon).
+// A tiny sky, turned like the compass: the top is the way you face (▲), or north (N) when that is not set; the
+// circle is the horizon, the middle is straight overhead; the dot is the sun or moon (hollow below the horizon).
 function skyIcon({ el, az }, colour) {
-  const r = 15 * (90 - Math.max(0, el)) / 90, x = 17 + r * Math.sin(rad(az)), y = 17 - r * Math.cos(rad(az));
+  const up = state.facing ?? 0, a = rad(az - up);
+  const r = 15 * (90 - Math.max(0, el)) / 90, x = 17 + r * Math.sin(a), y = 17 - r * Math.cos(a);
   const dot = el >= 0 ? `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3.6" fill="${colour}"/>`
     : `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3" fill="none" stroke="${colour}" stroke-width="1.2"/>`;
   return `<svg class="sky" viewBox="0 0 34 34"><circle cx="17" cy="17" r="15" fill="none" stroke="rgba(57,255,20,0.5)"/>`
-    + `<text x="17" y="8" text-anchor="middle">N</text>${dot}</svg>`;
+    + `<text x="17" y="8" text-anchor="middle">${state.facing == null ? 'N' : '▲'}</text>${dot}</svg>`;
 }
 
 async function quakeCount(area, days, minMag) {
@@ -702,17 +817,19 @@ async function earthData() {
 
 let dataToken = 0;
 async function showData() {
-  const token = ++dataToken, level = LEVELS[state.level], p = state.place;
+  const token = ++dataToken, level = LEVELS[state.level], p = state.place, h = state.here;
   $('levelName').textContent = levelTitle(level).toUpperCase();
-  $('where').textContent = level === 'city'
-    ? `${Math.abs(p.lat).toFixed(2)}°${p.lat >= 0 ? 'N' : 'S'} ${Math.abs(p.lon).toFixed(2)}°${p.lon >= 0 ? 'E' : 'W'} · ${p.state}, ${p.country}`
-    : level === 'earth' ? 'the whole planet' : `around ${p.name}`;
+  $('where').textContent = level === 'here'
+    ? (h ? `your spot in ${p.name}${h.accuracy ? ` · ±${Math.round(h.accuracy)} m` : ''} · ${h.source}` : `your spot is not known yet: showing ${p.name}'s centre`)
+    : level === 'city'
+      ? `${Math.abs(p.lat).toFixed(2)}°${p.lat >= 0 ? 'N' : 'S'} ${Math.abs(p.lon).toFixed(2)}°${p.lon >= 0 ? 'E' : 'W'} · ${p.state}, ${p.country}`
+      : level === 'earth' ? 'the whole planet' : `around ${p.name}`;
   renderLadder();
   renderNews();
   $('rows').replaceChildren(el('div', 'row dim', 'loading …'));
   $('sideRows').replaceChildren();
   try {
-    const d = level === 'city' ? await cityData(p) : level === 'earth' ? await earthData() : await regionData(level);
+    const d = level === 'here' || level === 'city' ? await cityData(focus(level)) : level === 'earth' ? await earthData() : await regionData(level);
     if (token !== dataToken) return;
     $('rows').replaceChildren(...d.rows.map((r) => el('div', 'row', esc(r))));
     $('sideTitle').textContent = d.sideTitle;
@@ -733,10 +850,13 @@ async function loadNews() {
 
 let newsX = 0, newsWidth = 0;
 function renderNews() {
-  const level = LEVELS[state.level];
-  const key = level === 'continent' || level === 'earth' ? 'world' : level;
-  const stories = state.news?.levels?.[key] || [];
-  $('newsLabel').textContent = `${(key === 'world' ? 'WORLD' : levelTitle(level)).toUpperCase()} NEWS`;
+  const level = LEVELS[state.level], n = state.news || {}, p = state.place;
+  // news.json is made for one place; anywhere else only the parts that match are used, the rest is world news
+  const matches = { city: n.place === p.name, state: n.state === p.state, country: n.country === p.country };
+  const wanted = level === 'here' ? 'city' : level;
+  const key = matches[wanted] ? wanted : 'world';
+  const stories = n.levels?.[key] || [];
+  $('newsLabel').textContent = `${(key === 'world' ? 'WORLD' : levelTitle(wanted)).toUpperCase()} NEWS`;
   const tz = state.data.tz;
   $('newsText').innerHTML = stories.length ? stories.map((s) => {
     const t = new Date(s.time).toLocaleString('en-GB', { timeZone: tz, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
@@ -832,8 +952,8 @@ function renderViews() {
 
 const setSource = (s) => { $('source').textContent = s; };
 const status = (s) => { $('status').textContent = s; };
-function setFrameTime(t, day) {
-  $('frameTime').textContent = t ? `PICTURE ${t.toLocaleString('en-GB', { timeZone: state.data.tz, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}`
+function setFrameTime(t, day, note = '') {
+  $('frameTime').textContent = t ? `PICTURE ${t.toLocaleString('en-GB', { timeZone: state.data.tz, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}${note}`
     : day ? `PICTURE ${day}` : '';
 }
 
@@ -893,12 +1013,18 @@ function fitScreen() {
 
 async function start(place) {
   $('setup').hidden = true;
+  status('finding where you are …');
+  state.here = await findHere();
+  // Somewhere else than the remembered place (more than 30 km)? Then the city, state and country follow you.
+  if (state.here && (!place || distanceKm(place.lat, place.lon, state.here.lat, state.here.lon) > 30)) {
+    place = await describe(state.here.lat, state.here.lon).catch(() => place);
+  }
   state.place = place;
   status('finding the areas …');
   place.boxes = place.boxes || await levelBoxes(place);   // remembered with the place, so later starts are quick
   state.boxes = place.boxes;
   savePlace(place);
-  goLevel(0);
+  goLevel(LEVELS.indexOf('city'));
 }
 
 async function boot() {
@@ -921,7 +1047,7 @@ async function boot() {
   if (!state.news) await loadNews();
   try {
     const place = await findPlace();
-    if (place) { await start(place); drawCompass(); } else $('setup').hidden = false;
+    if (place || navigator.geolocation) { await start(place); drawCompass(); } else $('setup').hidden = false;
   } catch (e) { status(e.message); $('setup').hidden = false; }
 }
 

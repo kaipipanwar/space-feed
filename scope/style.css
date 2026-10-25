@@ -104,3 +104,9 @@ h2 { font-size: 28px; margin-bottom: 8px; }
 #compass .body { filter: drop-shadow(0 0 6px currentColor); }
 #compass .bodyLabel { font: 700 12px "Share Tech Mono", monospace; }
 #compassNote { font: 16px "Share Tech Mono", monospace; color: var(--dim); margin-top: -6px; }
+
+/* Map tiles over the picture: live traffic and the rain radar */
+#tiles, #radarTiles { position: absolute; inset: 0; width: 1920px; height: 1080px; pointer-events: none; }
+/* (the general "#stage img" rules are for the full-screen pictures: tiles keep their own place and stay visible) */
+#stage img.tile { position: absolute; inset: auto; opacity: 1; transition: none; object-fit: fill; }
+#radarTiles img.tile { opacity: 0.8; }
