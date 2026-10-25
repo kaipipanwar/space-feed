@@ -327,28 +327,30 @@ function drawReticle(target, scale) {
   const { x, y } = target, ring = 300 * scale, gap = 26 * scale;
   g.lineCap = 'round';
   g.strokeStyle = 'rgba(57,255,20,0.16)';
-  g.lineWidth = 1;
+  g.lineWidth = 1;   // inside the ring: thin lines and range marks
   g.beginPath();
   for (const [sx, sy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-    g.moveTo(x + sx * gap, y + sy * gap); g.lineTo(x + sx * 4000, y + sy * 4000);
+    g.moveTo(x + sx * gap, y + sy * gap); g.lineTo(x + sx * ring, y + sy * ring);
     for (let k = 1; k < 5; k++) {   // range marks
       const r = gap + k * (ring - gap) / 5;
       if (sx) { g.moveTo(x + sx * r, y - 9); g.lineTo(x + sx * r, y + 9); } else { g.moveTo(x - 9, y + sy * r); g.lineTo(x + 9, y + sy * r); }
     }
   }
   g.stroke();
-  g.lineWidth = 2;   // slightly thicker posts outside the ring, still see-through
-  g.beginPath();
-  for (const [sx, sy] of [[1, 0], [-1, 0], [0, 1]]) { g.moveTo(x + sx * ring, y + sy * ring); g.lineTo(x + sx * 4000, y + sy * 4000); }
-  g.stroke();
-  g.lineWidth = 1;
   g.beginPath(); g.arc(x, y, ring, 0, Math.PI * 2); g.stroke();
+  g.lineWidth = 0.5;   // outside the ring: half-pixel lines to the edges of the screen
+  g.beginPath();
+  for (const [sx, sy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { g.moveTo(x + sx * ring, y + sy * ring); g.lineTo(x + sx * 4000, y + sy * 4000); }
+  g.stroke();
 
-  // The "you are here" line: brighter than the reticle but thin and see-through, the whole height of the screen.
+  // The "you are here" line: a little brighter than the reticle, 1 px inside the ring and 0.5 px outside it.
   g.save();
-  g.shadowColor = NEON; g.shadowBlur = 5;
-  g.strokeStyle = 'rgba(57,255,20,0.42)'; g.lineWidth = 1;
-  g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H - 120); g.stroke();
+  g.shadowColor = NEON; g.shadowBlur = 4;
+  g.strokeStyle = 'rgba(57,255,20,0.42)';
+  g.lineWidth = 1;
+  g.beginPath(); g.moveTo(x, y - ring); g.lineTo(x, y + ring); g.stroke();
+  g.lineWidth = 0.5;
+  g.beginPath(); g.moveTo(x, 0); g.lineTo(x, y - ring); g.moveTo(x, y + ring); g.lineTo(x, H - 120); g.stroke();
   g.restore();
   g.fillStyle = NEON; g.font = '700 26px Rajdhani, sans-serif'; g.textAlign = 'center';
   const tag = `▼ ${state.place.name.toUpperCase()}`;

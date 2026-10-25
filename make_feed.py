@@ -237,10 +237,12 @@ def crosshair(layer, x, y, scale=1.0):
     ring, gap = int(300 * scale), int(26 * scale)
     shadow, neon = (0, 0, 0, 25), NEON + (55,)
     for colour, grow in ((shadow, 1), (neon, 0)):
-        thick, thin = 2 + grow, 1 + grow
+        thin = 1 + grow
         for sx, sy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             far = 2000
-            d.line((x + sx * ring, y + sy * ring, x + sx * far, y + sy * far), fill=colour, width=thick)
+            # outside the ring: 1 px at half strength, the closest Pillow gets to a 0.5 px line
+            d.line((x + sx * ring, y + sy * ring, x + sx * far, y + sy * far),
+                   fill=colour[:3] + (colour[3] // 2,), width=1)
             d.line((x + sx * gap, y + sy * gap, x + sx * ring, y + sy * ring), fill=colour, width=thin)
             for k in range(1, 5):  # range marks, like mil-dots
                 r = gap + k * (ring - gap) // 5
