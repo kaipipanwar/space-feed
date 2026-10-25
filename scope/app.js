@@ -1,6 +1,6 @@
 // Earth Scope: the Earth over one place, seen through a scope, from the city out to the whole planet.
 // Keys (PC keyboard or TV remote): left/right = pictures, up = zoom out, down = zoom in, OK/Enter or W = weather
-// layer on/off, S = change place.
+// layer on/off, S = change place (and which way you face when you look at the screen, for the compass).
 // All data comes from free public services that allow web pages to read them; news.json is made by the
 // GitHub Action (make_news.py), because news feeds do not allow that.
 'use strict';
@@ -17,13 +17,13 @@ const CONTINENTS = {   // [south, west, north, east] boxes for the continent lev
 const EUMETSAT = 'https://view.eumetsat.int/geoserver/ows';
 const GIBS = 'https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi';
 const ESRI = 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export';
-// Screen areas the panels cover (x1, y1, x2, y2): a place under them is moved into view.
-const PANELS = [[20, 20, 760, 560], [1380, 150, 1900, 620], [0, 900, 1920, 1080]];
+
 const DAILY = ['MODIS_Terra_CorrectedReflectance_TrueColor', 'VIIRS_NOAA20_CorrectedReflectance_TrueColor',
   'VIIRS_SNPP_CorrectedReflectance_TrueColor', 'MODIS_Aqua_CorrectedReflectance_TrueColor'];
 const LOOP_FRAMES = 16, LOOP_STEP_MS = 1100, AUTO_VIEW_MS = 45000;
 
-const state = { place: null, level: 0, view: 0, boxes: {}, views: [], loop: null, news: null, data: {}, lastKey: 0, weather: false };
+const state = { place: null, level: 0, view: 0, boxes: {}, views: [], loop: null, news: null, data: {}, lastKey: 0, weather: false,
+  facing: null };   // the compass direction you face when you look at the screen (degrees), if known
 
 // ---------- small helpers ----------
 
@@ -51,6 +51,31 @@ function sunPosition(lat, lon, when) {
   const az = Math.atan2(Math.sin(ha), Math.cos(ha) * Math.sin(p) - Math.tan(decl) * Math.cos(p));
   return { el: deg(el), az: (deg(az) + 180) % 360 };
 }
+
+// Sun and Moon: the point on Earth where each is straight overhead, then its height and direction from the place.
+const dJ = (t) => t / 864e5 + 2440587.5 - 2451545.0, sn = (x) => Math.sin(rad(x));
+function sunLon(t) { const d = dJ(t), g = 357.528 + 0.9856003 * d; return (((280.460 + 0.9856474 * d + 1.915 * sn(g) + 0.020 * sn(2 * g)) % 360) + 360) % 360; }
+function moonLonLat(t) {
+  const d = dJ(t), lp = 218.316 + 13.176396 * d, mp = 134.963 + 13.064993 * d, f = 93.272 + 13.229350 * d;
+  const dd = 297.850 + 12.190749 * d, m = 357.529 + 0.98560028 * d;
+  const lon = lp + 6.289 * sn(mp) + 1.274 * sn(2 * dd - mp) + 0.658 * sn(2 * dd) + 0.214 * sn(2 * mp) - 0.186 * sn(m) - 0.114 * sn(2 * f);
+  return [((lon % 360) + 360) % 360, 5.128 * sn(f)];
+}
+function overhead(t, lon, lat = 0) {   // ecliptic longitude/latitude -> the point on Earth below it
+  const d = dJ(t), eps = rad(23.439 - 0.0000004 * d), l = rad(lon), b = rad(lat);
+  const ra = deg(Math.atan2(Math.sin(l) * Math.cos(eps) - Math.tan(b) * Math.sin(eps), Math.cos(l)));
+  const dec = deg(Math.asin(Math.sin(b) * Math.cos(eps) + Math.cos(b) * Math.sin(eps) * Math.sin(l)));
+  const gmst = (((280.46061837 + 360.98564736629 * d) % 360) + 360) % 360;
+  return [dec, ((((ra - gmst) % 360) + 540) % 360) - 180];
+}
+function skyPosition([oLat, oLon], lat, lon) {   // height above the horizon and compass direction, degrees
+  const p1 = rad(lat), p2 = rad(oLat), dl = rad(oLon - lon);
+  const dist = Math.acos(Math.max(-1, Math.min(1, Math.sin(p1) * Math.sin(p2) + Math.cos(p1) * Math.cos(p2) * Math.cos(dl))));
+  const az = Math.atan2(Math.sin(dl) * Math.cos(p2), Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl));
+  return { el: 90 - deg(dist), az: (deg(az) + 360) % 360 };
+}
+const sunSky = (t, lat, lon) => skyPosition(overhead(t, sunLon(t)), lat, lon);
+const moonSky = (t, lat, lon) => skyPosition(overhead(t, ...moonLonLat(t)), lat, lon);
 
 function moon(when) {
   const month = 29.530588, age = ((when - Date.UTC(2000, 0, 6, 18, 14)) / 864e5) % month;
@@ -84,22 +109,10 @@ function fit16x9([s, w, n, e], margin = 1.15) {
 const onScreen = ([s, w, n, e], lat, lon) => ({ x: (lon - w) / (e - w) * W, y: (n - lat) / (n - s) * H });
 
 // Slide a box so the place does not sit under a panel (the area stays the same size).
-function clearOfPanels(box, lat, lon) {
-  let [s, w, n, e] = box;
-  for (let tries = 0; tries < 3; tries++) {
-    const { x, y } = onScreen([s, w, n, e], lat, lon);
-    const hit = PANELS.find(([x1, y1, x2, y2]) => x > x1 && x < x2 && y > y1 && y < y2);
-    if (!hit) break;
-    const [x1, , x2, y2] = hit;
-    // move the shortest way out: sideways for the side panels, upwards for the bottom bars
-    let dx = 0, dy = 0;
-    if (hit[1] >= 900) dy = y - (hit[1] - 40);
-    else if (x1 < W / 2) dx = (x2 + 60) - x; else dx = (x1 - 60) - x;
-    const lonPerPx = (e - w) / W, latPerPx = (n - s) / H;
-    w -= dx * lonPerPx; e -= dx * lonPerPx; s -= dy * latPerPx; n -= dy * latPerPx;
-    void y2;
-  }
-  return [s, w, n, e];
+// The same area, moved so the place is exactly in the middle of the screen.
+function centreOn([s, w, n, e], lat, lon) {
+  const latSpan = n - s, lonSpan = e - w;
+  return [lat - latSpan / 2, lon - lonSpan / 2, lat + latSpan / 2, lon + lonSpan / 2];
 }
 
 const wmsBox = ([s, w, n, e]) => `${s},${w},${n},${e}`;   // WMS 1.3.0 with EPSG:4326 wants lat,lon order
@@ -243,12 +256,12 @@ function globeTarget(photo, p) {
 
 // The pictures (views) of a level; left/right moves between them.
 function viewsFor(level) {
-  const p = state.place, clear = (b) => clearOfPanels(b, p.lat, p.lon);
+  const p = state.place, world = [-90, -180, 90, 180];
   if (level === 'earth') {
-    return [{ kind: 'map', name: 'satellite map', box: [-90, -180, 90, 180] }, { kind: 'globe', name: 'whole Earth, NASA EPIC' },
-      { kind: 'daily', name: 'world today', box: [-90, -180, 90, 180], gap: 0.3 }];
+    return [{ kind: 'map', name: 'satellite map', box: world }, { kind: 'globe', name: 'whole Earth, NASA EPIC' },
+      { kind: 'daily', name: 'world today', box: world, gap: 0.3 }];
   }
-  const box = clear(state.boxes[level]);
+  const box = centreOn(state.boxes[level], p.lat, p.lon);
   // The sharp map (Esri World Imagery, the same map Trade Eye uses) comes first: very close at the city level.
   const map = { kind: 'map', name: 'satellite map', box: level === 'city' ? box16x9(p.lat, p.lon, 0.045) : box };
   const views = [{ kind: 'loop', name: 'live loop', box }, { kind: 'still', name: 'newest picture', box }];
@@ -256,6 +269,21 @@ function viewsFor(level) {
   const daily = { kind: 'daily', name: 'sharpest today', box: sharp, gap: level === 'city' ? 0.01 : 0.08 };
   // Small areas: the sharp daily picture before the loop (the 15-minute satellite is blocky this close).
   return level === 'city' || level === 'state' ? [map, daily, ...views] : [map, ...views, daily];
+}
+
+// A whole-world picture with the place's longitude in the middle: two halves (the map services cannot wrap
+// around the date line), joined on a canvas. makeUrl(box, width, height) gives the picture of one box.
+async function worldCentred(lon, makeUrl) {
+  const c = document.createElement('canvas'); c.width = W; c.height = W / 2;
+  const g = c.getContext('2d');
+  const west = lon - 180, cut = Math.round((180 - west) / 360 * W);   // pixels from the left edge to longitude 180
+  const parts = [[[-90, west, 90, 180], 0, cut], [[-90, -180, 90, west], cut, W - cut]];
+  if (west < -180) { parts[0][0] = [-90, west + 360, 90, 180]; parts[1][0] = [-90, -180, 90, west + 360]; }
+  for (const [box, x, width] of parts) {
+    if (width < 2) continue;
+    g.drawImage(await loadImage(makeUrl(box, width, W / 2)), x, 0, width, W / 2);
+  }
+  return c.toDataURL('image/jpeg', 0.9);
 }
 
 function mapUrl([s, w, n, e], width, height) {
@@ -272,27 +300,40 @@ async function showView() {
   drawWeather(null);
   try {
     if (view.kind === 'map') {
-      const earth = level === 'earth';
-      setPicture(mapUrl(view.box, W, earth ? W / 2 : H), earth);
       setSource('Esri World Imagery · sharpest photos, months to years old (not live)');
       setFrameTime(null);
-      drawReticle(earth ? onEarthMap(p) : onScreen(view.box, p.lat, p.lon), level === 'city' ? 1 : 0.6);
+      if (level === 'earth') {
+        const url = await worldCentred(p.lon, (b, w, h) => mapUrl(b, w, h));
+        if (token !== showToken) return;
+        showWorld(url);
+      } else {
+        setPicture(mapUrl(view.box, W, H));
+        drawReticle(CENTRE, level === 'city' ? 1 : 0.6);
+      }
     } else if (view.kind === 'globe') {
       const g = await newestGlobe(p);
       if (token !== showToken) return;
-      setPicture(g.url, true);   // NASA's photos may be shown but not read by a page, so no loadImage here
+      // NASA's photos may be shown but not read by a page; the globe is moved so the place is in the middle.
       const target = globeTarget(g.photo, p);
+      setPicture(g.url, true, [W / 2 - target.x, H / 2 - target.y]);
       setSource('NASA EPIC camera, 1.5 million km away');
       setFrameTime(new Date(g.photo.date.replace(' ', 'T') + 'Z'));
-      drawReticle(target, 0.35);
+      drawReticle(CENTRE, 0.35);
     } else if (view.kind === 'daily') {
       const d = await newestDaily(view.box, view.gap);
       if (token !== showToken) return;
       if (!d) throw new Error('no clear daily picture in the last 4 days');
-      setPicture(d.url, level === 'earth');
       setSource(`NASA ${d.layer.split('_').slice(0, 2).join(' ')} · ${d.day}`);
       setFrameTime(null, d.day);
-      drawReticle(level === 'earth' ? onEarthMap(p) : onScreen(view.box, p.lat, p.lon), level === 'city' ? 1 : 0.6);
+      if (level === 'earth') {
+        const url = await worldCentred(p.lon, (b, w, h) => `${GIBS}?${qs({ SERVICE: 'WMS', REQUEST: 'GetMap', VERSION: '1.3.0',
+          LAYERS: d.layer, CRS: 'EPSG:4326', BBOX: wmsBox(b), FORMAT: 'image/jpeg', WIDTH: w, HEIGHT: h, TIME: d.day })}`);
+        if (token !== showToken) return;
+        showWorld(url);
+      } else {
+        setPicture(d.url);
+        drawReticle(onScreen(view.box, p.lat, p.lon), level === 'city' ? 1 : 0.6);
+      }
     } else {
       const src = geoSource((view.box[1] + view.box[3]) / 2);
       const times = await loopTimes(view.box, src);
@@ -318,45 +359,103 @@ async function showView() {
 
 // ---------- the weather layer (OK / Enter) ----------
 
-// Rain from NASA IMERG (newest half hour it has, a few hours old) and a live grid of temperature and wind arrows.
-let weatherToken = 0;
+// The weather layer: a heat colour layer, flowing wind streaks and falling rain from a live 12 x 7 grid of
+// Open-Meteo points, over NASA IMERG's rain map (the newest half hour it has, a few hours old).
+let weatherToken = 0, weatherRun = null;
+const TEMP_COLOURS = [[-20, [70, 60, 200]], [0, [60, 170, 255]], [12, [60, 220, 160]], [22, [250, 230, 80]], [32, [255, 140, 40]], [42, [230, 30, 40]]];
+function tempColour(t) {
+  for (let i = 1; i < TEMP_COLOURS.length; i++) {
+    const [t1, c1] = TEMP_COLOURS[i];
+    if (t <= t1) { const [t0, c0] = TEMP_COLOURS[i - 1], k = Math.max(0, (t - t0) / (t1 - t0)); return c0.map((v, j) => Math.round(v + (c1[j] - v) * k)); }
+  }
+  return last(TEMP_COLOURS)[1];
+}
+
 async function drawWeather(view) {
-  const token = ++weatherToken, c = $('weather'), g = c.getContext('2d'), rain = $('rain');
-  g.clearRect(0, 0, W, H);
+  const token = ++weatherToken, rain = $('rain');
+  cancelAnimationFrame(weatherRun);
+  for (const id of ['weather', 'heat']) $(id).getContext('2d').clearRect(0, 0, W, H);
   rain.classList.remove('on');
   $('weatherTag').hidden = !view;
   if (!view) return;
-  if (!view.box) { $('weatherTag').textContent = 'WEATHER: not on the globe, press → for the world map'; return; }
-  const earth = LEVELS[state.level] === 'earth';
-  const box = view.box, top = earth ? (H - W / 2) / 2 : 0, height = earth ? W / 2 : H;
-  $('weatherTag').textContent = 'WEATHER ON · rain: NASA IMERG (latest, a few hours old) · wind and °C: live';
-  rain.style.top = `${top}px`; rain.style.height = `${height}px`;
+  const level = LEVELS[state.level];
+  if (level === 'earth') { $('weatherTag').textContent = 'WEATHER: zoom in (↓) for the weather layer'; return; }
+  const box = view.box;
+  $('weatherTag').innerHTML = 'WEATHER ON · <b>heat</b> <span class="scale"></span> · wind and rain: live · NASA rain map: a few hours old';
   rain.onload = () => { if (token === weatherToken) rain.classList.add('on'); };
   rain.src = `${GIBS}?${qs({ SERVICE: 'WMS', REQUEST: 'GetMap', VERSION: '1.3.0', LAYERS: 'IMERG_Precipitation_Rate_30min', CRS: 'EPSG:4326',
-    BBOX: wmsBox(box), FORMAT: 'image/png', TRANSPARENT: 'TRUE', WIDTH: W / 2, HEIGHT: height / 2 })}`;
-  // 8 x 5 grid of live weather points
-  const [s, w, n, e] = box, cols = 8, rows = 5, lats = [], lons = [];
+    BBOX: wmsBox(box), FORMAT: 'image/png', TRANSPARENT: 'TRUE', WIDTH: W / 2, HEIGHT: H / 2 })}`;
+  const [s, w, n, e] = box, cols = 12, rows = 7, lats = [], lons = [];
   for (let i = 0; i < rows; i++) for (let j = 0; j < cols; j++) {
     lats.push(Math.max(-89, Math.min(89, n - (n - s) * (i + 0.5) / rows)).toFixed(3));
-    lons.push((w + (e - w) * (j + 0.5) / cols).toFixed(3));
+    lons.push((((w + (e - w) * (j + 0.5) / cols) + 540) % 360 - 180).toFixed(3));
   }
   const r = await json(`https://api.open-meteo.com/v1/forecast?${qs({ latitude: lats.join(','), longitude: lons.join(','),
-    current: 'temperature_2m,wind_speed_10m,wind_direction_10m' })}`).catch(() => null);
+    current: 'temperature_2m,wind_speed_10m,wind_direction_10m,precipitation' })}`).catch(() => null);
   if (token !== weatherToken || !r) return;
-  for (const pt of Array.isArray(r) ? r : [r]) {
-    const cur = pt.current; if (!cur) continue;
-    const x = (pt.longitude - w) / (e - w) * W, y = top + (n - pt.latitude) / (n - s) * height;
-    const len = 14 + Math.min(40, cur.wind_speed_10m), a = rad(cur.wind_direction_10m + 180);   // arrow points where the wind goes
-    const dx = Math.sin(a) * len, dy = -Math.cos(a) * len;
-    g.strokeStyle = 'rgba(255,255,255,0.75)'; g.fillStyle = 'rgba(255,255,255,0.75)'; g.lineWidth = 1.5;
-    g.beginPath(); g.moveTo(x - dx / 2, y - dy / 2); g.lineTo(x + dx / 2, y + dy / 2); g.stroke();
-    const hx = x + dx / 2, hy = y + dy / 2, ha = Math.atan2(dy, dx);
-    g.beginPath(); g.moveTo(hx, hy); g.lineTo(hx - 9 * Math.cos(ha - 0.5), hy - 9 * Math.sin(ha - 0.5));
-    g.lineTo(hx - 9 * Math.cos(ha + 0.5), hy - 9 * Math.sin(ha + 0.5)); g.closePath(); g.fill();
-    g.font = '700 22px "Share Tech Mono", monospace'; g.textAlign = 'center';
-    g.lineWidth = 4; g.strokeStyle = 'rgba(0,0,0,0.7)'; g.strokeText(`${Math.round(cur.temperature_2m)}°`, x, y + 34);
-    g.fillStyle = '#ffd34d'; g.fillText(`${Math.round(cur.temperature_2m)}°`, x, y + 34);
+  const pts = (Array.isArray(r) ? r : [r]).map((q) => q.current || {});
+  const cell = (i, j) => pts[Math.max(0, Math.min(rows - 1, i)) * cols + Math.max(0, Math.min(cols - 1, j))] || {};
+
+  // Heat: one coloured pixel per point, stretched smoothly over the screen.
+  const tiny = document.createElement('canvas'); tiny.width = cols; tiny.height = rows;
+  const tg = tiny.getContext('2d');
+  for (let i = 0; i < rows; i++) for (let j = 0; j < cols; j++) {
+    const [R, G, B] = tempColour(cell(i, j).temperature_2m ?? 20);
+    tg.fillStyle = `rgb(${R},${G},${B})`; tg.fillRect(j, i, 1, 1);
   }
+  const hg = $('heat').getContext('2d');
+  hg.imageSmoothingEnabled = true; hg.globalAlpha = 0.33; hg.drawImage(tiny, 0, 0, W, H); hg.globalAlpha = 1;
+  hg.font = '700 20px "Share Tech Mono", monospace'; hg.textAlign = 'center';
+  for (let i = 0; i < rows; i++) for (let j = 0; j < cols; j++) {
+    const t = cell(i, j).temperature_2m; if (t == null) continue;
+    const x = (j + 0.5) / cols * W, y = (i + 0.5) / rows * H;
+    hg.lineWidth = 4; hg.strokeStyle = 'rgba(0,0,0,0.6)'; hg.strokeText(`${Math.round(t)}°`, x, y);
+    hg.fillStyle = '#fff'; hg.fillText(`${Math.round(t)}°`, x, y);
+  }
+  const ramp = TEMP_COLOURS.map(([t, [R, G, B]]) => `<i style="background:rgb(${R},${G},${B})">${t}°</i>`).join('');
+  $('weatherTag').querySelector('.scale').innerHTML = ramp;
+
+  // Wind at any screen point, mixed from the four nearest grid points (pixels per frame).
+  const wind = (x, y) => {
+    const fj = x / W * cols - 0.5, fi = y / H * rows - 0.5, j = Math.floor(fj), i = Math.floor(fi), a = fj - j, b = fi - i;
+    let u = 0, v = 0;
+    for (const [di, dj, k] of [[0, 0, (1 - a) * (1 - b)], [0, 1, a * (1 - b)], [1, 0, (1 - a) * b], [1, 1, a * b]]) {
+      const c = cell(i + di, j + dj), sp = (c.wind_speed_10m || 0) * 0.09, to = rad((c.wind_direction_10m || 0) + 180);
+      u += k * sp * Math.sin(to); v -= k * sp * Math.cos(to);
+    }
+    return [u, v];
+  };
+  const rainAt = (x, y) => cell(Math.floor(y / H * rows), Math.floor(x / W * cols)).precipitation || 0;
+  const g = $('weather').getContext('2d');
+  const streaks = Array.from({ length: 900 }, () => ({ x: Math.random() * W, y: Math.random() * H, age: Math.random() * 80 }));
+  const drops = [];
+  const frame = () => {
+    if (token !== weatherToken) return;
+    g.globalCompositeOperation = 'destination-out';   // fade the old trails
+    g.fillStyle = 'rgba(0,0,0,0.08)'; g.fillRect(0, 0, W, H);
+    g.globalCompositeOperation = 'source-over';
+    g.strokeStyle = 'rgba(255,255,255,0.9)'; g.lineWidth = 1.8; g.beginPath();
+    for (const q of streaks) {
+      const [u, v] = wind(q.x, q.y);
+      g.moveTo(q.x, q.y); q.x += u; q.y += v; g.lineTo(q.x, q.y);
+      if (++q.age > 90 || q.x < 0 || q.x > W || q.y < 0 || q.y > H) { q.x = Math.random() * W; q.y = Math.random() * H; q.age = 0; }
+    }
+    g.stroke();
+    // rain: new drops where it rains now, more for heavier rain
+    for (let k = 0; k < 40; k++) {
+      const x = Math.random() * W, y = Math.random() * H, mm = rainAt(x, y);
+      if (mm > 0 && Math.random() < Math.min(1, mm / 2)) drops.push({ x, y, life: 18 });
+    }
+    g.strokeStyle = 'rgba(120,190,255,0.85)'; g.lineWidth = 1.5; g.beginPath();
+    for (let k = drops.length - 1; k >= 0; k--) {
+      const d = drops[k], [u] = wind(d.x, d.y);
+      g.moveTo(d.x, d.y); d.x += u * 0.5 - 1; d.y += 14; g.lineTo(d.x, d.y);
+      if (--d.life <= 0) drops.splice(k, 1);
+    }
+    g.stroke();
+    weatherRun = requestAnimationFrame(frame);
+  };
+  frame();
 }
 
 function toggleWeather() {
@@ -365,17 +464,22 @@ function toggleWeather() {
 }
 
 // The world map is 2:1, shown "contain" in the 16:9 screen.
-function onEarthMap(p) {
-  const mapH = W / 2, top = (H - mapH) / 2;
-  return { x: (p.lon + 180) / 360 * W, y: top + (90 - p.lat) / 180 * mapH };
+const CENTRE = { x: W / 2, y: H / 2 };
+
+// A centred world map (2:1) on the 16:9 screen, moved up or down so the place is in the middle too.
+function showWorld(url) {
+  const mapH = W / 2, y = (H - mapH) / 2 + (90 - state.place.lat) / 180 * mapH;
+  setPicture(url, true, [0, H / 2 - y]);
+  drawReticle(CENTRE, 0.6);
 }
 
 let front = 'imgA', pictureCount = 0;
-function setPicture(url, contain = false) {
+function setPicture(url, contain = false, [dx, dy] = [0, 0]) {
   const mine = ++pictureCount;   // a slow older picture must not cover a newer one
   const next = front === 'imgA' ? 'imgB' : 'imgA';
   const img = $(next);
   img.classList.toggle('contain', contain);
+  img.style.transform = dx || dy ? `translate(${dx}px, ${dy}px)` : '';
   img.onload = () => {
     if (mine !== pictureCount) return;
     img.classList.add('on'); $(front).classList.remove('on'); front = next;
@@ -418,7 +522,7 @@ function drawReticle(target, scale) {
   g.clearRect(0, 0, W, H);
   const { x, y } = target, ring = 300 * scale, gap = 26 * scale;
   g.lineCap = 'round';
-  g.strokeStyle = 'rgba(57,255,20,0.42)';   // as visible as the "you are here" line
+  g.strokeStyle = 'rgba(57,255,20,0.55)';   // as visible as the "you are here" line
   g.lineWidth = 1;   // inside the ring: thin lines and range marks
   g.beginPath();
   for (const [sx, sy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
@@ -438,7 +542,7 @@ function drawReticle(target, scale) {
   // The "you are here" line: 0.5 px the whole height of the screen, with a soft glow.
   g.save();
   g.shadowColor = NEON; g.shadowBlur = 4;
-  g.strokeStyle = 'rgba(57,255,20,0.42)';
+  g.strokeStyle = 'rgba(57,255,20,0.55)';
   g.lineWidth = 0.5;
   g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H - 64); g.stroke();
   g.restore();
@@ -476,7 +580,7 @@ async function cityData(p) {
   const air = await json(`https://air-quality-api.open-meteo.com/v1/air-quality?${qs({ latitude: p.lat, longitude: p.lon, current: 'us_aqi,pm2_5,pm10' })}`).catch(() => null);
   const quakes = await quakeCount({ latitude: p.lat, longitude: p.lon, maxradiuskm: 300 }, 30, 2.5);
   const iss = await json('https://api.wheretheiss.at/v1/satellites/25544').catch(() => null);
-  const sun = sunPosition(p.lat, p.lon, now);
+  const sun = sunSky(now, p.lat, p.lon), mn = moonSky(now, p.lat, p.lon);
   state.data.aqi = air?.current?.us_aqi; state.data.temp = c.temperature_2m;
   return {
     rows: [
@@ -498,8 +602,9 @@ async function cityData(p) {
       ['PRESS', `${Math.round(c.surface_pressure)} hPa · ${Math.round(c.pressure_msl)} MSL`],
       ['DENS ALT', `${fmt(densityAltitude(c.surface_pressure, c.temperature_2m))} m`],
       ['VIS', `${(c.visibility / 1000).toFixed(1)} km`],
-      ['SUN', `az ${pad2(Math.round(sun.az)).padStart(3, '0')}° · el ${sun.el >= 0 ? '+' : ''}${Math.round(sun.el)}°`],
-      ['MOON', moon(now)],
+      ['SUN', `${skyIcon(sun, '#ffd34d')} az ${String(Math.round(sun.az)).padStart(3, '0')}° · el ${sun.el >= 0 ? '+' : ''}${Math.round(sun.el)}°`],
+      ['MOON', `${skyIcon(mn, '#e8f0ff')} az ${String(Math.round(mn.az)).padStart(3, '0')}° · el ${mn.el >= 0 ? '+' : ''}${Math.round(mn.el)}°`],
+      ['', moon(now)],
       // ground water: share of water in the soil at each depth (about 50% is soaked)
       ['SOIL H2O', soil.slice(0, 3).map(([depth, v]) => `${depth.replace(' cm', '')} ${v == null ? '—' : Math.round(v * 100) + '%'}`).join(' · ')],
       ['', soil.slice(3).map(([depth, v]) => `${depth.replace(' cm', '')} ${v == null ? '—' : Math.round(v * 100) + '%'}`).join(' · ') + ' cm'],
@@ -513,6 +618,16 @@ async function kpLine() {
   if (!kp) return '';
   state.data.kp = Number(Array.isArray(last(kp)) ? last(kp)[1] : last(kp).Kp);
   return `Space weather: Kp ${state.data.kp} ${state.data.kp >= 5 ? '(storm, auroras likely)' : '(quiet)'}`;
+}
+
+// A tiny sky: the circle is the horizon, the middle is straight overhead, north is up; the dot is the sun or moon
+// (hollow when it is below the horizon).
+function skyIcon({ el, az }, colour) {
+  const r = 15 * (90 - Math.max(0, el)) / 90, x = 17 + r * Math.sin(rad(az)), y = 17 - r * Math.cos(rad(az));
+  const dot = el >= 0 ? `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3.6" fill="${colour}"/>`
+    : `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3" fill="none" stroke="${colour}" stroke-width="1.2"/>`;
+  return `<svg class="sky" viewBox="0 0 34 34"><circle cx="17" cy="17" r="15" fill="none" stroke="rgba(57,255,20,0.5)"/>`
+    + `<text x="17" y="8" text-anchor="middle">N</text>${dot}</svg>`;
 }
 
 async function quakeCount(area, days, minMag) {
@@ -599,7 +714,11 @@ async function showData() {
     if (token !== dataToken) return;
     $('rows').replaceChildren(...d.rows.map((r) => el('div', 'row', esc(r))));
     $('sideTitle').textContent = d.sideTitle;
-    $('sideRows').replaceChildren(...d.side.map(([k, v]) => el('div', 'row', `<b>${esc(k)}</b>${esc(v)}`)));
+    // values may start with a small sky picture (<svg>); everything else is escaped text
+    $('sideRows').replaceChildren(...d.side.map(([k, v]) => {
+      const m = String(v).match(/^(<svg[^]*<\/svg>)(.*)$/);
+      return el('div', 'row', `<b>${esc(k)}</b>${m ? m[1] + esc(m[2]) : esc(v)}`);
+    }));
   } catch (e) { console.warn(e); $('rows').textContent = 'data not available right now'; }
 }
 
@@ -630,16 +749,56 @@ function scrollNews(ms) {
   $('newsText').style.transform = `translateX(${newsX}px)`;
 }
 
+// ---------- the sky compass ----------
+
+// A compass for the room: "up" on the compass is the direction you face when you look at the screen (set once
+// with S, or read from the device's own compass on a phone or tablet). It also shows the sun and moon: the edge is
+// the horizon, the middle is straight overhead.
+function drawCompass() {
+  const svg = $('compass'), p = state.place;
+  if (!p) return;
+  const facing = state.facing ?? 0, now = new Date(), R = 100, C = 120;
+  const pos = (az, r) => [C + r * Math.sin(rad(az - facing)), C - r * Math.cos(rad(az - facing))];
+  let html = `<circle cx="${C}" cy="${C}" r="${R}" class="ring"/><circle cx="${C}" cy="${C}" r="${R * 2 / 3}" class="faint"/>`
+    + `<circle cx="${C}" cy="${C}" r="${R / 3}" class="faint"/>`;
+  for (let a = 0; a < 360; a += 10) {
+    const [x1, y1] = pos(a, R), [x2, y2] = pos(a, a % 90 ? R - 7 : R - 14);
+    html += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" class="${a % 90 ? 'tick' : 'major'}"/>`;
+  }
+  for (const [a, name] of [[0, 'N'], [90, 'E'], [180, 'S'], [270, 'W'], [45, 'NE'], [135, 'SE'], [225, 'SW'], [315, 'NW']]) {
+    const [x, y] = pos(a, R + 14);
+    html += `<text x="${x}" y="${y + 6}" class="${name.length === 1 ? 'card' : 'inter'}${name === 'N' ? ' north' : ''}">${name}</text>`;
+  }
+  const [nx, ny] = pos(0, R - 18), [sx, sy] = pos(180, R - 18);   // the needle
+  html += `<line x1="${sx}" y1="${sy}" x2="${C}" y2="${C}" class="needleS"/><line x1="${C}" y1="${C}" x2="${nx}" y2="${ny}" class="needleN"/>`;
+  for (const [body, colour, label] of [[sunSky(now, p.lat, p.lon), '#ffd34d', 'SUN'], [moonSky(now, p.lat, p.lon), '#e8f0ff', 'MOON']]) {
+    const [x, y] = pos(body.az, R * (90 - Math.max(0, body.el)) / 90);
+    html += body.el >= 0 ? `<circle cx="${x}" cy="${y}" r="9" fill="${colour}" class="body"/>`
+      : `<circle cx="${x}" cy="${y}" r="7" fill="none" stroke="${colour}" stroke-width="2" stroke-dasharray="3 3"/>`;
+    html += `<text x="${x}" y="${y - 13}" class="bodyLabel" fill="${colour}">${label}</text>`;
+  }
+  html += `<circle cx="${C}" cy="${C}" r="3" class="hub"/>`;
+  svg.innerHTML = html;
+  $('compassNote').textContent = state.facing == null ? 'press S to set which way you face' : `you face ${Math.round(facing)}° ${compass(facing)}`;
+}
+
+function setFacing(deg) {
+  if (!Number.isFinite(deg)) return;
+  state.facing = ((deg % 360) + 360) % 360;
+  try { localStorage.setItem('earthscope.facing', String(state.facing)); } catch { /* fine */ }
+  drawCompass();
+}
+
 // ---------- clock, ladder, dots ----------
 
-// A calculator digit: 7 segments; the unlit ones glow faintly, so every digit shows its "8".
-const SEGMENTS = { a: [10, 2, 20, 6], b: [31, 9, 6, 23], c: [31, 42, 6, 23], d: [10, 66, 20, 6], e: [3, 42, 6, 23], f: [3, 9, 6, 23], g: [10, 34, 20, 6] };
+// A calculator digit: only the lit segments of the 7 are drawn.
+const SEGMENTS = { a: [10, 1, 20, 8], b: [30, 8, 8, 25], c: [30, 41, 8, 25], d: [10, 65, 20, 8], e: [2, 41, 8, 25], f: [2, 8, 8, 25], g: [10, 33, 20, 8] };
 const DIGITS = { 0: 'abcdef', 1: 'bc', 2: 'abged', 3: 'abgcd', 4: 'fgbc', 5: 'afgcd', 6: 'afgedc', 7: 'abc', 8: 'abcdefg', 9: 'abcdfg' };
 function digitSvg(ch) {
   if (ch === ':') return '<svg viewBox="0 0 16 74" class="colon"><circle cx="8" cy="24" r="3.5"/><circle cx="8" cy="52" r="3.5"/></svg>';
   const on = DIGITS[ch] || '';
-  return `<svg viewBox="0 0 40 74"><g transform="skewX(-4) translate(3 0)">${Object.entries(SEGMENTS).map(([k, [x, y, w, h]]) =>
-    `<rect class="${on.includes(k) ? 'on' : 'off'}" x="${x}" y="${y}" width="${w}" height="${h}" rx="2.5"/>`).join('')}</g></svg>`;
+  return `<svg viewBox="0 0 40 74"><g transform="skewX(-4) translate(3 0)">${Object.entries(SEGMENTS).filter(([k]) => on.includes(k))
+    .map(([, [x, y, w, h]]) => `<rect class="on" x="${x}" y="${y}" width="${w}" height="${h}" rx="3"/>`).join('')}</g></svg>`;
 }
 
 let lastTime = '';
@@ -653,9 +812,10 @@ function tickClock() {
       if (s.dataset.ch !== ch) { s.dataset.ch = ch; s.innerHTML = digitSvg(ch); s.classList.remove('tick'); void s.offsetWidth; s.classList.add('tick'); }
     });
     lastTime = time;
-    const date = now.toLocaleDateString('en-GB', { timeZone: tz, weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' }).toUpperCase();
-    const utc = `${pad2(now.getUTCHours())}:${pad2(now.getUTCMinutes())} UTC`;
-    $('date').textContent = `${date} · ${utc}`;
+    const day = now.toLocaleDateString('en-GB', { timeZone: tz, weekday: 'long' }).toUpperCase();
+    const date = now.toLocaleDateString('en-GB', { timeZone: tz, day: '2-digit', month: 'short', year: 'numeric' }).toUpperCase();
+    $('date').innerHTML = `<b>${esc(day)}</b> · ${esc(date)} <span class="utc">${pad2(now.getUTCHours())}:${pad2(now.getUTCMinutes())} UTC</span>`;
+    if (now.getSeconds() % 30 === 0) drawCompass();   // the sun and moon move slowly
   }
 }
 
@@ -678,6 +838,7 @@ function setFrameTime(t, day) {
 
 function goLevel(i) {
   state.level = Math.max(0, Math.min(LEVELS.length - 1, i));
+  $('camera').classList.toggle('drift', LEVELS[state.level] !== 'earth');   // a far-away camera, not at the Earth level
   state.views = viewsFor(LEVELS[state.level]);
   state.view = 0;
   showData();
@@ -705,7 +866,11 @@ document.addEventListener('keydown', (e) => {
 
 $('setup').addEventListener('submit', async (e) => {
   e.preventDefault();
-  try { await start(await searchCity($('setupCity').value.trim())); } catch (err) { status(err.message); }
+  const facing = parseFloat($('setupFacing').value);
+  if (Number.isFinite(facing)) setFacing(facing);
+  const city = $('setupCity').value.trim();
+  if (!city && state.place) { $('setup').hidden = true; return; }
+  try { await start(await searchCity(city)); } catch (err) { status(err.message); }
 });
 $('setupGps').addEventListener('click', () => navigator.geolocation.getCurrentPosition(
   async (pos) => start(await describe(pos.coords.latitude, pos.coords.longitude)), (err) => status(err.message)));
@@ -734,6 +899,11 @@ async function start(place) {
 }
 
 async function boot() {
+  // which way you face: from the address (?facing=135), from this browser, or from the device's own compass
+  const facingParam = parseFloat(new URLSearchParams(location.search).get('facing'));
+  try { const saved = parseFloat(localStorage.getItem('earthscope.facing')); if (Number.isFinite(saved)) state.facing = saved; } catch { /* fine */ }
+  if (Number.isFinite(facingParam)) setFacing(facingParam);
+  addEventListener('deviceorientationabsolute', (ev) => { if (ev.absolute && ev.alpha != null) setFacing(360 - ev.alpha); });
   fitScreen();
   addEventListener('resize', fitScreen);
   let last = performance.now();
@@ -748,7 +918,7 @@ async function boot() {
   if (!state.news) await loadNews();
   try {
     const place = await findPlace();
-    if (place) await start(place); else $('setup').hidden = false;
+    if (place) { await start(place); drawCompass(); } else $('setup').hidden = false;
   } catch (e) { status(e.message); $('setup').hidden = false; }
 }
 

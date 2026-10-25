@@ -11,7 +11,13 @@ body { color: var(--text); font: 26px "Rajdhani", system-ui, sans-serif; }
 
 /* The fixed 1920 x 1080 screen, scaled by app.js to fit the window. */
 #screen { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; transform-origin: 0 0; overflow: hidden; }
-#stage, #stage img, #reticle, #weather { position: absolute; inset: 0; width: 1920px; height: 1080px; }
+#camera, #sway, #stage, #stage img, #reticle, #weather, #heat { position: absolute; inset: 0; width: 1920px; height: 1080px; }
+/* The far-away camera: a slow drift with zoom, and a faster small sway on top (not at the Earth level). */
+#camera.drift { animation: drift 26s ease-in-out infinite alternate; }
+#camera.drift #sway { animation: sway 7.3s ease-in-out infinite alternate; }
+@keyframes drift { 0% { transform: scale(1.08) translate(-22px, -14px) rotate(-0.5deg); }
+  50% { transform: scale(1.12) translate(18px, 10px) rotate(0.4deg); } 100% { transform: scale(1.09) translate(-8px, 20px) rotate(-0.2deg); } }
+@keyframes sway { 0% { transform: translate(-6px, 3px) rotate(0.15deg); } 100% { transform: translate(6px, -4px) rotate(-0.15deg); } }
 #stage #rain { object-fit: fill; opacity: 0; transition: opacity 0.6s ease; }
 #stage #rain.on { opacity: 0.85; }
 #stage img { object-fit: fill; opacity: 0; transition: opacity 0.9s ease; image-rendering: auto; }
@@ -34,15 +40,16 @@ h2 { font-size: 28px; margin-bottom: 8px; }
 
 /* Animated clock: each digit slides when it changes. */
 #clock { position: absolute; right: 40px; top: 28px; text-align: right; }
-#time { display: flex; justify-content: flex-end; gap: 4px; height: 74px; filter: drop-shadow(0 0 6px rgba(57, 255, 20, 0.55)); }
+#time { display: flex; justify-content: flex-end; gap: 5px; height: 74px; filter: drop-shadow(0 0 8px rgba(57, 255, 20, 0.7)); }
 #time span { display: inline-block; }
 #time svg { height: 74px; width: 40px; display: block; }
 #time svg.colon { width: 16px; fill: var(--neon); }
 #time rect.on { fill: var(--neon); }
-#time rect.off { fill: rgba(57, 255, 20, 0.07); }
 #time span.tick { animation: tick 0.45s ease; }
 @keyframes tick { from { transform: translateY(-40%); opacity: 0; } to { transform: none; opacity: 1; } }
-#date { margin-top: 6px; font: 26px "Share Tech Mono", monospace; color: var(--text); letter-spacing: 2px; }
+#date { margin-top: 8px; font: 700 30px "Rajdhani", sans-serif; color: var(--text); letter-spacing: 3px; text-shadow: 0 0 6px rgba(0,0,0,0.9); }
+#date b { color: var(--neon); }
+#date .utc { font: 20px "Share Tech Mono", monospace; color: var(--dim); letter-spacing: 1px; }
 
 /* Zoom ladder (up/down) and picture dots (left/right). */
 #ladder { position: absolute; right: 40px; bottom: 100px; text-align: right; font: 22px "Share Tech Mono", monospace; }
@@ -51,8 +58,8 @@ h2 { font-size: 28px; margin-bottom: 8px; }
 #views { position: absolute; left: 50%; bottom: 84px; transform: translateX(-50%); font: 22px "Share Tech Mono", monospace; color: var(--dim);
   background: var(--panel); padding: 6px 16px; border-radius: 20px; }
 #views b { color: var(--neon); font-weight: normal; }
-#status { position: absolute; left: 40px; bottom: 84px; font: 18px "Share Tech Mono", monospace; color: var(--dim); }
-#weatherTag { position: absolute; left: 40px; bottom: 112px; font: 20px "Share Tech Mono", monospace; color: #ffd34d; background: var(--panel); padding: 4px 12px; border-radius: 8px; }
+#status { position: absolute; left: 330px; bottom: 84px; font: 18px "Share Tech Mono", monospace; color: var(--dim); }
+#weatherTag { position: absolute; left: 330px; bottom: 112px; font: 20px "Share Tech Mono", monospace; color: #ffd34d; background: var(--panel); padding: 4px 12px; border-radius: 8px; }
 
 /* Bottom: the scrolling news with summaries. */
 #newsLine { position: absolute; left: 0; right: 0; bottom: 0; height: 64px; display: flex; background: #070707; }
@@ -69,3 +76,28 @@ h2 { font-size: 28px; margin-bottom: 8px; }
 #setup input, #setup button { font: 28px "Rajdhani", sans-serif; padding: 8px 14px; margin: 6px 6px 6px 0; background: #031; color: var(--text);
   border: 1px solid var(--neon); border-radius: 8px; }
 #setup input { width: 380px; }
+
+/* Weather legend */
+#weatherTag b { color: #fff; }
+#weatherTag .scale i { font-style: normal; color: #000; padding: 0 6px; font-size: 16px; }
+
+/* Small sky pictures beside SUN and MOON */
+#sideRows svg.sky { width: 30px; height: 30px; vertical-align: middle; margin-right: 8px; }
+#sideRows svg.sky text { font: 9px "Share Tech Mono", monospace; fill: var(--dim); }
+
+/* The sky compass, bottom left */
+#compassBox { position: absolute; left: 40px; bottom: 80px; width: 260px; text-align: center; }
+#compass { width: 250px; height: 250px; background: radial-gradient(circle, rgba(0,0,0,0.65) 55%, rgba(0,0,0,0) 72%); border-radius: 50%; }
+#compass .ring { fill: none; stroke: var(--neon); stroke-width: 2; }
+#compass .faint { fill: none; stroke: rgba(57, 255, 20, 0.2); stroke-width: 1; }
+#compass .tick { stroke: rgba(57, 255, 20, 0.6); stroke-width: 1; }
+#compass .major { stroke: var(--neon); stroke-width: 2.5; }
+#compass text { font: 700 18px "Rajdhani", sans-serif; text-anchor: middle; fill: var(--text); }
+#compass text.inter { font-size: 12px; fill: var(--dim); }
+#compass text.north { fill: #ff4040; font-size: 22px; }
+#compass .needleN { stroke: #ff4040; stroke-width: 4; stroke-linecap: round; }
+#compass .needleS { stroke: rgba(200, 255, 210, 0.6); stroke-width: 4; stroke-linecap: round; }
+#compass .hub { fill: #fff; }
+#compass .body { filter: drop-shadow(0 0 6px currentColor); }
+#compass .bodyLabel { font: 700 12px "Share Tech Mono", monospace; }
+#compassNote { font: 16px "Share Tech Mono", monospace; color: var(--dim); margin-top: -6px; }

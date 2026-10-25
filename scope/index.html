@@ -12,9 +12,13 @@
 <body>
 <!-- Everything is drawn on a 1920 x 1080 "screen" that is scaled to fit the window or the TV. -->
 <div id="screen">
-  <div id="stage"><img id="imgA" alt=""><img id="imgB" alt=""><img id="rain" alt=""></div>
-  <canvas id="weather" width="1920" height="1080"></canvas>
-  <canvas id="reticle" width="1920" height="1080"></canvas>
+  <!-- The "camera": the picture, the weather and the scope move together, like a camera far away watching. -->
+  <div id="camera"><div id="sway">
+    <div id="stage"><img id="imgA" alt=""><img id="imgB" alt=""><img id="rain" alt=""></div>
+    <canvas id="heat" width="1920" height="1080"></canvas>
+    <canvas id="weather" width="1920" height="1080"></canvas>
+    <canvas id="reticle" width="1920" height="1080"></canvas>
+  </div></div>
 
   <section id="info" class="panel">
     <h1 id="levelName">EARTH SCOPE</h1>
@@ -35,6 +39,7 @@
     <div id="sideRows"></div>
   </section>
 
+  <div id="compassBox"><svg id="compass" viewBox="0 0 240 240"></svg><div id="compassNote"></div></div>
   <nav id="ladder"></nav>
   <div id="views"></div>
   <div id="status"></div>
@@ -46,6 +51,8 @@
     <h2>Choose your place</h2>
     <p>Type a city. Nothing is saved anywhere except this browser.</p>
     <input id="setupCity" placeholder="e.g. Bikaner" autocomplete="off">
+    <p>Compass: stand in front of the screen, point your phone's compass at it, and type the degrees it shows.</p>
+    <input id="setupFacing" placeholder="e.g. 135" inputmode="numeric" autocomplete="off">
     <button>Go</button>
     <button type="button" id="setupGps">Use my location</button>
     <p class="dim">Keys: ← → pictures · ↑ ↓ zoom out / in · OK weather · S change place</p>
