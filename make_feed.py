@@ -235,9 +235,9 @@ def crosshair(layer, x, y, scale=1.0):
     """A duplex rifle-scope reticle: thick posts outside, thin lines inside, a gap and dot in the middle."""
     d = ImageDraw.Draw(layer)
     ring, gap = int(300 * scale), int(26 * scale)
-    shadow, neon = (0, 0, 0, 45), NEON + (95,)
+    shadow, neon = (0, 0, 0, 25), NEON + (55,)
     for colour, grow in ((shadow, 1), (neon, 0)):
-        thick, thin = 3 + grow, 1 + grow
+        thick, thin = 2 + grow, 1 + grow
         for sx, sy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             far = 2000
             d.line((x + sx * ring, y + sy * ring, x + sx * far, y + sy * far), fill=colour, width=thick)

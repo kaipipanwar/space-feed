@@ -30,6 +30,7 @@ const pad2 = (n) => String(n).padStart(2, '0');
 const compass = (d) => 'N NNE NE ENE E ESE SE SSE S SSW SW WSW W WNW NW NNW'.split(' ')[Math.round(d / 22.5) % 16];
 const fmt = (n, d = 0) => Number(n).toLocaleString('en-IN', { maximumFractionDigits: d, minimumFractionDigits: d });
 const el = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html !== undefined) e.innerHTML = html; return e; };
+const last = (a) => a[a.length - 1];   // older TV browsers lack Array.prototype.at
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 function distanceKm(a, b, c, d) {
@@ -325,8 +326,8 @@ function drawReticle(target, scale) {
   g.clearRect(0, 0, W, H);
   const { x, y } = target, ring = 300 * scale, gap = 26 * scale;
   g.lineCap = 'round';
-  g.strokeStyle = 'rgba(57,255,20,0.32)';
-  g.lineWidth = 1.5;
+  g.strokeStyle = 'rgba(57,255,20,0.16)';
+  g.lineWidth = 1;
   g.beginPath();
   for (const [sx, sy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
     g.moveTo(x + sx * gap, y + sy * gap); g.lineTo(x + sx * 4000, y + sy * 4000);
@@ -336,17 +337,17 @@ function drawReticle(target, scale) {
     }
   }
   g.stroke();
-  g.lineWidth = 4;   // thicker posts outside the ring, still see-through
+  g.lineWidth = 2;   // slightly thicker posts outside the ring, still see-through
   g.beginPath();
   for (const [sx, sy] of [[1, 0], [-1, 0], [0, 1]]) { g.moveTo(x + sx * ring, y + sy * ring); g.lineTo(x + sx * 4000, y + sy * 4000); }
   g.stroke();
-  g.lineWidth = 1.5;
+  g.lineWidth = 1;
   g.beginPath(); g.arc(x, y, ring, 0, Math.PI * 2); g.stroke();
 
-  // The "you are here" line: bright, solid, the whole height of the screen.
+  // The "you are here" line: brighter than the reticle but thin and see-through, the whole height of the screen.
   g.save();
-  g.shadowColor = NEON; g.shadowBlur = 14;
-  g.strokeStyle = 'rgba(57,255,20,0.9)'; g.lineWidth = 2;
+  g.shadowColor = NEON; g.shadowBlur = 5;
+  g.strokeStyle = 'rgba(57,255,20,0.42)'; g.lineWidth = 1;
   g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H - 120); g.stroke();
   g.restore();
   g.fillStyle = NEON; g.font = '700 26px Rajdhani, sans-serif'; g.textAlign = 'center';
@@ -456,9 +457,9 @@ async function earthData() {
     json('https://eonet.gsfc.nasa.gov/api/v3/events?status=open&days=30').catch(() => null),
     json('https://api.wheretheiss.at/v1/satellites/25544').catch(() => null),
   ]);
-  const kpNow = kp ? Number(Array.isArray(kp.at(-1)) ? kp.at(-1)[1] : kp.at(-1).Kp) : null;
+  const kpNow = kp ? Number(Array.isArray(last(kp)) ? last(kp)[1] : last(kp).Kp) : null;
   const speed = wind ? Number(wind[0]?.proton_speed) : null;
-  const flux = xray ? xray.filter((r) => r.energy === '0.1-0.8nm').at(-1)?.flux : null;
+  const flux = xray ? last(xray.filter((r) => r.energy === '0.1-0.8nm'))?.flux : null;
   const flare = flux ? (flux >= 1e-4 ? 'X' : flux >= 1e-5 ? 'M' : flux >= 1e-6 ? 'C' : flux >= 1e-7 ? 'B' : 'A') + (flux / 10 ** Math.floor(Math.log10(flux))).toFixed(1) : '—';
   state.data.kp = kpNow;
   const cats = {};
@@ -551,7 +552,7 @@ async function renderDataLine() {
   if (state.data.aqi != null) tiles.push(['AQI', `${fmt(state.data.aqi)} ${aqiName(state.data.aqi)}`]);
   if (state.data.kp == null) {
     const kp = await json('https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json').catch(() => null);
-    if (kp) state.data.kp = Number(Array.isArray(kp.at(-1)) ? kp.at(-1)[1] : kp.at(-1).Kp);
+    if (kp) state.data.kp = Number(Array.isArray(last(kp)) ? last(kp)[1] : last(kp).Kp);
   }
   if (state.data.kp != null) tiles.push(['KP', String(state.data.kp)]);
   tiles.push(['SPOT PRICES', 'world market, before Indian tax']);
