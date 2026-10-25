@@ -1,6 +1,6 @@
 # Space pictures for the TV screensaver
 
-`nasa-space.csv` is a list of real space pictures for the [Aerial Views](https://github.com/theothernt/AerialViews)
+`entries.json` (and the same list as `nasa-space.csv`) is a list of real space pictures for the [Aerial Views](https://github.com/theothernt/AerialViews)
 screensaver on Android TV. A GitHub Action runs `make_feed.py` every day, so the list stays fresh.
 
 - **Earth:** whole-Earth photos from NASA's EPIC camera on the DSCOVR satellite, 1.5 million km away.
@@ -11,7 +11,10 @@ Every caption names its source. The pictures stay on NASA's and ESA's servers; t
 
 ## Use it
 
-In Aerial Views: Media Sources → Custom feeds → add the raw link to `nasa-space.csv` (it must end in `.csv`).
+In Aerial Views: Media Sources → Custom feeds → add the raw link to `entries.json`:
+`https://raw.githubusercontent.com/kaipipanwar/space-feed/main/entries.json`
+
+Use `entries.json`, not the `.csv`: Aerial Views 1.8.5 shows photo captions only from `entries.json`.
 
 ## Run it yourself
 

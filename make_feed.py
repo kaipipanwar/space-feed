@@ -1,17 +1,22 @@
-"""Build a picture list (CSV) of real space pictures for the Aerial Views screensaver.
+"""Build a picture list of real space pictures for the Aerial Views screensaver, in two formats.
 
-Each line is "<picture url>,<caption>". Aerial Views reads the list again every time the screensaver
-starts, so running this script once a day keeps the TV's pictures fresh.
+  nasa-space.csv  each line is "<picture url>,<caption>".
+  entries.json    the same pictures as {"photos": [{"url-1080": ..., "title": ...}]}. Use this one on the TV:
+                  Aerial Views 1.8.5 shows the caption of a photo only from entries.json, not from a CSV list.
+
+Aerial Views reads the list again every time the screensaver starts, so running this script once a day
+keeps the TV's pictures fresh.
 
 Sources (all free, no key needed):
   Earth  NASA EPIC camera on the DSCOVR satellite, 1.5 million km away: the whole Earth, several photos a day.
   Webb   ESA/Webb picture feed: the newest James Webb Space Telescope pictures (CC BY 4.0, credit ESA/Webb).
   Mars   NASA Image Library, JPL landscapes from the Mars rovers and landers.
 
-Usage: python make_feed.py [output.csv]
+Usage: python make_feed.py [output.csv]   (entries.json is written in the same folder)
 """
 
 import json
+import os
 import re
 import sys
 import urllib.parse
@@ -105,7 +110,7 @@ def mars():
 
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else "nasa-space.csv"
-    lines = []
+    pictures = []
     for name, source in (("Earth", earth), ("Webb", webb), ("Mars", mars)):
         try:
             found = source()
@@ -113,12 +118,17 @@ def main():
             print(f"{name}: failed ({e})")
             continue
         print(f"{name}: {len(found)} pictures")
-        lines += [f"{url},{caption}" for url, caption in found]
-    if not lines:
+        pictures += found
+    if not pictures:
         sys.exit("no pictures found; the old list is kept")
     with open(out, "w", encoding="utf-8", newline="\n") as f:
-        f.write("\n".join(lines) + "\n")
-    print(f"wrote {len(lines)} pictures to {out}")
+        f.write("".join(f"{url},{caption}\n" for url, caption in pictures))
+    entries = os.path.join(os.path.dirname(out), "entries.json")
+    with open(entries, "w", encoding="utf-8", newline="\n") as f:
+        photos = [{"url-1080": url, "title": caption} for url, caption in pictures]
+        json.dump({"photos": photos}, f, ensure_ascii=False, indent=1)
+        f.write("\n")
+    print(f"wrote {len(pictures)} pictures to {out} and {entries}")
 
 
 if __name__ == "__main__":
