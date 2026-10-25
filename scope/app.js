@@ -638,9 +638,10 @@ function fitScreen() {
 async function start(place) {
   $('setup').hidden = true;
   state.place = place;
-  savePlace(place);
   status('finding the areas …');
-  state.boxes = await levelBoxes(place);
+  place.boxes = place.boxes || await levelBoxes(place);   // remembered with the place, so later starts are quick
+  state.boxes = place.boxes;
+  savePlace(place);
   goLevel(0);
 }
 
