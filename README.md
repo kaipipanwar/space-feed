@@ -20,11 +20,11 @@ the bottom (scrolling in the video). The place is set with the repository secret
 https://kaipipanwar.github.io/space-feed/scope/
 
 - Keys (keyboard or TV remote): ← → switch pictures, ↑ zoom out (city → state → country → continent → Earth),
-  ↓ zoom in, S choose another place. Anyone can use their own place: press S, or open
+  ↓ zoom in, OK / Enter weather layer (rain, wind, temperature), S choose another place. Anyone can use their own place: press S, or open
   `scope/?lat=..&lon=..&name=..`. The place is kept only in that browser.
 - Data, all fetched live by the page: Open-Meteo (weather, soil moisture, air), USGS (earthquakes), NASA EONET
-  (natural events), NOAA SWPC (space weather), wheretheiss.at, gold-api.com and open.er-api.com (spot prices),
-  EUMETSAT / NOAA GOES / JMA Himawari / NASA GIBS and NASA EPIC (pictures), BigDataCloud and Nominatim (place names
+  (natural events), NOAA SWPC (space weather), wheretheiss.at,
+  Esri World Imagery (sharp map, not live), EUMETSAT / NOAA GOES / JMA Himawari / NASA GIBS (incl. IMERG rain) and NASA EPIC (pictures), BigDataCloud and Nominatim (place names
   and areas). `news.json` (Bing News with summaries, Google News, BBC World) is made by `make_news.py` in the Action,
   for the place in the secrets `PLACE`, `STATE`, `COUNTRY` and `NEWS`.
 

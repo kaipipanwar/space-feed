@@ -12,7 +12,8 @@
 <body>
 <!-- Everything is drawn on a 1920 x 1080 "screen" that is scaled to fit the window or the TV. -->
 <div id="screen">
-  <div id="stage"><img id="imgA" alt=""><img id="imgB" alt=""></div>
+  <div id="stage"><img id="imgA" alt=""><img id="imgB" alt=""><img id="rain" alt=""></div>
+  <canvas id="weather" width="1920" height="1080"></canvas>
   <canvas id="reticle" width="1920" height="1080"></canvas>
 
   <section id="info" class="panel">
@@ -32,14 +33,13 @@
   <section id="side" class="panel">
     <h2 id="sideTitle">SCOPE DATA</h2>
     <div id="sideRows"></div>
-    <div id="gauge"></div>
   </section>
 
   <nav id="ladder"></nav>
   <div id="views"></div>
   <div id="status"></div>
+  <div id="weatherTag" hidden></div>
 
-  <div id="dataLine"></div>
   <div id="newsLine"><div id="newsLabel">NEWS</div><div id="newsWindow"><div id="newsText"></div></div></div>
 
   <form id="setup" hidden>
@@ -48,7 +48,7 @@
     <input id="setupCity" placeholder="e.g. Bikaner" autocomplete="off">
     <button>Go</button>
     <button type="button" id="setupGps">Use my location</button>
-    <p class="dim">Keys: ← → pictures · ↑ ↓ zoom out / in · S change place</p>
+    <p class="dim">Keys: ← → pictures · ↑ ↓ zoom out / in · OK weather · S change place</p>
   </form>
 </div>
 <script src="app.js"></script>

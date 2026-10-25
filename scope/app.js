@@ -1,5 +1,6 @@
 // Earth Scope: the Earth over one place, seen through a scope, from the city out to the whole planet.
-// Keys (PC keyboard or TV remote): left/right = pictures, up = zoom out, down = zoom in, S = change place.
+// Keys (PC keyboard or TV remote): left/right = pictures, up = zoom out, down = zoom in, OK/Enter or W = weather
+// layer on/off, S = change place.
 // All data comes from free public services that allow web pages to read them; news.json is made by the
 // GitHub Action (make_news.py), because news feeds do not allow that.
 'use strict';
@@ -15,11 +16,14 @@ const CONTINENTS = {   // [south, west, north, east] boxes for the continent lev
 };
 const EUMETSAT = 'https://view.eumetsat.int/geoserver/ows';
 const GIBS = 'https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi';
+const ESRI = 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export';
+// Screen areas the panels cover (x1, y1, x2, y2): a place under them is moved into view.
+const PANELS = [[20, 20, 760, 560], [1380, 150, 1900, 620], [0, 900, 1920, 1080]];
 const DAILY = ['MODIS_Terra_CorrectedReflectance_TrueColor', 'VIIRS_NOAA20_CorrectedReflectance_TrueColor',
   'VIIRS_SNPP_CorrectedReflectance_TrueColor', 'MODIS_Aqua_CorrectedReflectance_TrueColor'];
 const LOOP_FRAMES = 16, LOOP_STEP_MS = 1100, AUTO_VIEW_MS = 45000;
 
-const state = { place: null, level: 0, view: 0, boxes: {}, views: [], loop: null, news: null, data: {}, lastKey: 0 };
+const state = { place: null, level: 0, view: 0, boxes: {}, views: [], loop: null, news: null, data: {}, lastKey: 0, weather: false };
 
 // ---------- small helpers ----------
 
@@ -78,6 +82,25 @@ function fit16x9([s, w, n, e], margin = 1.15) {
 
 // Where a place falls on screen inside a box (plain latitude/longitude grid).
 const onScreen = ([s, w, n, e], lat, lon) => ({ x: (lon - w) / (e - w) * W, y: (n - lat) / (n - s) * H });
+
+// Slide a box so the place does not sit under a panel (the area stays the same size).
+function clearOfPanels(box, lat, lon) {
+  let [s, w, n, e] = box;
+  for (let tries = 0; tries < 3; tries++) {
+    const { x, y } = onScreen([s, w, n, e], lat, lon);
+    const hit = PANELS.find(([x1, y1, x2, y2]) => x > x1 && x < x2 && y > y1 && y < y2);
+    if (!hit) break;
+    const [x1, , x2, y2] = hit;
+    // move the shortest way out: sideways for the side panels, upwards for the bottom bars
+    let dx = 0, dy = 0;
+    if (hit[1] >= 900) dy = y - (hit[1] - 40);
+    else if (x1 < W / 2) dx = (x2 + 60) - x; else dx = (x1 - 60) - x;
+    const lonPerPx = (e - w) / W, latPerPx = (n - s) / H;
+    w -= dx * lonPerPx; e -= dx * lonPerPx; s -= dy * latPerPx; n -= dy * latPerPx;
+    void y2;
+  }
+  return [s, w, n, e];
+}
 
 const wmsBox = ([s, w, n, e]) => `${s},${w},${n},${e}`;   // WMS 1.3.0 with EPSG:4326 wants lat,lon order
 
@@ -220,13 +243,23 @@ function globeTarget(photo, p) {
 
 // The pictures (views) of a level; left/right moves between them.
 function viewsFor(level) {
-  const box = state.boxes[level];
-  if (level === 'earth') return [{ kind: 'globe', name: 'whole Earth, NASA EPIC' }, { kind: 'daily', name: 'world today', box, gap: 0.3 }];
+  const p = state.place, clear = (b) => clearOfPanels(b, p.lat, p.lon);
+  if (level === 'earth') {
+    return [{ kind: 'map', name: 'satellite map', box: [-90, -180, 90, 180] }, { kind: 'globe', name: 'whole Earth, NASA EPIC' },
+      { kind: 'daily', name: 'world today', box: [-90, -180, 90, 180], gap: 0.3 }];
+  }
+  const box = clear(state.boxes[level]);
+  // The sharp map (Esri World Imagery, the same map Trade Eye uses) comes first: very close at the city level.
+  const map = { kind: 'map', name: 'satellite map', box: level === 'city' ? box16x9(p.lat, p.lon, 0.045) : box };
   const views = [{ kind: 'loop', name: 'live loop', box }, { kind: 'still', name: 'newest picture', box }];
-  const sharp = level === 'city' ? box16x9(state.place.lat, state.place.lon, 1.5) : box;
+  const sharp = level === 'city' ? box16x9(p.lat, p.lon, 1.5) : box;
   const daily = { kind: 'daily', name: 'sharpest today', box: sharp, gap: level === 'city' ? 0.01 : 0.08 };
-  // Small areas: the sharp daily picture first (the 15-minute satellite is blocky this close).
-  return level === 'city' || level === 'state' ? [daily, ...views] : [...views, daily];
+  // Small areas: the sharp daily picture before the loop (the 15-minute satellite is blocky this close).
+  return level === 'city' || level === 'state' ? [map, daily, ...views] : [map, ...views, daily];
+}
+
+function mapUrl([s, w, n, e], width, height) {
+  return `${ESRI}?${qs({ bbox: `${w},${s},${e},${n}`, bboxSR: 4326, imageSR: 4326, size: `${width},${height}`, format: 'jpg', f: 'image' })}`;
 }
 
 let showToken = 0;
@@ -236,8 +269,15 @@ async function showView() {
   const level = LEVELS[state.level], view = state.views[state.view], p = state.place;
   renderViews();
   status('loading pictures …');
+  drawWeather(null);
   try {
-    if (view.kind === 'globe') {
+    if (view.kind === 'map') {
+      const earth = level === 'earth';
+      setPicture(mapUrl(view.box, W, earth ? W / 2 : H), earth);
+      setSource('Esri World Imagery · sharpest photos, months to years old (not live)');
+      setFrameTime(null);
+      drawReticle(earth ? onEarthMap(p) : onScreen(view.box, p.lat, p.lon), level === 'city' ? 1 : 0.6);
+    } else if (view.kind === 'globe') {
       const g = await newestGlobe(p);
       if (token !== showToken) return;
       setPicture(g.url, true);   // NASA's photos may be shown but not read by a page, so no loadImage here
@@ -269,10 +309,59 @@ async function showView() {
       }
     }
     status('');
+    if (state.weather) drawWeather(view);
   } catch (e) {
     console.warn(e);
     status(`picture not available: ${e.message}`);
   }
+}
+
+// ---------- the weather layer (OK / Enter) ----------
+
+// Rain from NASA IMERG (newest half hour it has, a few hours old) and a live grid of temperature and wind arrows.
+let weatherToken = 0;
+async function drawWeather(view) {
+  const token = ++weatherToken, c = $('weather'), g = c.getContext('2d'), rain = $('rain');
+  g.clearRect(0, 0, W, H);
+  rain.classList.remove('on');
+  $('weatherTag').hidden = !view;
+  if (!view) return;
+  if (!view.box) { $('weatherTag').textContent = 'WEATHER: not on the globe, press → for the world map'; return; }
+  const earth = LEVELS[state.level] === 'earth';
+  const box = view.box, top = earth ? (H - W / 2) / 2 : 0, height = earth ? W / 2 : H;
+  $('weatherTag').textContent = 'WEATHER ON · rain: NASA IMERG (latest, a few hours old) · wind and °C: live';
+  rain.style.top = `${top}px`; rain.style.height = `${height}px`;
+  rain.onload = () => { if (token === weatherToken) rain.classList.add('on'); };
+  rain.src = `${GIBS}?${qs({ SERVICE: 'WMS', REQUEST: 'GetMap', VERSION: '1.3.0', LAYERS: 'IMERG_Precipitation_Rate_30min', CRS: 'EPSG:4326',
+    BBOX: wmsBox(box), FORMAT: 'image/png', TRANSPARENT: 'TRUE', WIDTH: W / 2, HEIGHT: height / 2 })}`;
+  // 8 x 5 grid of live weather points
+  const [s, w, n, e] = box, cols = 8, rows = 5, lats = [], lons = [];
+  for (let i = 0; i < rows; i++) for (let j = 0; j < cols; j++) {
+    lats.push(Math.max(-89, Math.min(89, n - (n - s) * (i + 0.5) / rows)).toFixed(3));
+    lons.push((w + (e - w) * (j + 0.5) / cols).toFixed(3));
+  }
+  const r = await json(`https://api.open-meteo.com/v1/forecast?${qs({ latitude: lats.join(','), longitude: lons.join(','),
+    current: 'temperature_2m,wind_speed_10m,wind_direction_10m' })}`).catch(() => null);
+  if (token !== weatherToken || !r) return;
+  for (const pt of Array.isArray(r) ? r : [r]) {
+    const cur = pt.current; if (!cur) continue;
+    const x = (pt.longitude - w) / (e - w) * W, y = top + (n - pt.latitude) / (n - s) * height;
+    const len = 14 + Math.min(40, cur.wind_speed_10m), a = rad(cur.wind_direction_10m + 180);   // arrow points where the wind goes
+    const dx = Math.sin(a) * len, dy = -Math.cos(a) * len;
+    g.strokeStyle = 'rgba(255,255,255,0.75)'; g.fillStyle = 'rgba(255,255,255,0.75)'; g.lineWidth = 1.5;
+    g.beginPath(); g.moveTo(x - dx / 2, y - dy / 2); g.lineTo(x + dx / 2, y + dy / 2); g.stroke();
+    const hx = x + dx / 2, hy = y + dy / 2, ha = Math.atan2(dy, dx);
+    g.beginPath(); g.moveTo(hx, hy); g.lineTo(hx - 9 * Math.cos(ha - 0.5), hy - 9 * Math.sin(ha - 0.5));
+    g.lineTo(hx - 9 * Math.cos(ha + 0.5), hy - 9 * Math.sin(ha + 0.5)); g.closePath(); g.fill();
+    g.font = '700 22px "Share Tech Mono", monospace'; g.textAlign = 'center';
+    g.lineWidth = 4; g.strokeStyle = 'rgba(0,0,0,0.7)'; g.strokeText(`${Math.round(cur.temperature_2m)}°`, x, y + 34);
+    g.fillStyle = '#ffd34d'; g.fillText(`${Math.round(cur.temperature_2m)}°`, x, y + 34);
+  }
+}
+
+function toggleWeather() {
+  state.weather = !state.weather;
+  drawWeather(state.weather ? state.views[state.view] : null);
 }
 
 // The world map is 2:1, shown "contain" in the 16:9 screen.
@@ -329,7 +418,7 @@ function drawReticle(target, scale) {
   g.clearRect(0, 0, W, H);
   const { x, y } = target, ring = 300 * scale, gap = 26 * scale;
   g.lineCap = 'round';
-  g.strokeStyle = 'rgba(57,255,20,0.16)';
+  g.strokeStyle = 'rgba(57,255,20,0.42)';   // as visible as the "you are here" line
   g.lineWidth = 1;   // inside the ring: thin lines and range marks
   g.beginPath();
   for (const [sx, sy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
@@ -346,14 +435,12 @@ function drawReticle(target, scale) {
   for (const [sx, sy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { g.moveTo(x + sx * ring, y + sy * ring); g.lineTo(x + sx * 4000, y + sy * 4000); }
   g.stroke();
 
-  // The "you are here" line: a little brighter than the reticle, 1 px inside the ring and 0.5 px outside it.
+  // The "you are here" line: 0.5 px the whole height of the screen, with a soft glow.
   g.save();
   g.shadowColor = NEON; g.shadowBlur = 4;
   g.strokeStyle = 'rgba(57,255,20,0.42)';
-  g.lineWidth = 1;
-  g.beginPath(); g.moveTo(x, y - ring); g.lineTo(x, y + ring); g.stroke();
   g.lineWidth = 0.5;
-  g.beginPath(); g.moveTo(x, 0); g.lineTo(x, y - ring); g.moveTo(x, y + ring); g.lineTo(x, H - 120); g.stroke();
+  g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H - 64); g.stroke();
   g.restore();
   g.fillStyle = NEON; g.font = '700 26px Rajdhani, sans-serif'; g.textAlign = 'center';
   const tag = `▼ ${state.place.name.toUpperCase()}`;
@@ -400,6 +487,7 @@ async function cityData(p) {
       air ? `Air: AQI ${fmt(air.current.us_aqi)} (${aqiName(air.current.us_aqi)}) · PM2.5 ${fmt(air.current.pm2_5)} · PM10 ${fmt(air.current.pm10)}` : 'Air: —',
       `Earthquakes ≤300 km, 30 days: ${quakes}`,
       iss ? `Space station: ${fmt(distanceKm(p.lat, p.lon, iss.latitude, iss.longitude))} km away, ${fmt(iss.altitude)} km up` : '',
+      await kpLine(),
     ].filter(Boolean),
     sideTitle: 'SCOPE DATA',
     side: [
@@ -412,9 +500,19 @@ async function cityData(p) {
       ['VIS', `${(c.visibility / 1000).toFixed(1)} km`],
       ['SUN', `az ${pad2(Math.round(sun.az)).padStart(3, '0')}° · el ${sun.el >= 0 ? '+' : ''}${Math.round(sun.el)}°`],
       ['MOON', moon(now)],
+      // ground water: share of water in the soil at each depth (about 50% is soaked)
+      ['SOIL H2O', soil.slice(0, 3).map(([depth, v]) => `${depth.replace(' cm', '')} ${v == null ? '—' : Math.round(v * 100) + '%'}`).join(' · ')],
+      ['', soil.slice(3).map(([depth, v]) => `${depth.replace(' cm', '')} ${v == null ? '—' : Math.round(v * 100) + '%'}`).join(' · ') + ' cm'],
     ],
-    soil,
   };
+}
+
+// Space weather in one line (Kp 0-9: 5 or more is a geomagnetic storm).
+async function kpLine() {
+  const kp = await json('https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json').catch(() => null);
+  if (!kp) return '';
+  state.data.kp = Number(Array.isArray(last(kp)) ? last(kp)[1] : last(kp).Kp);
+  return `Space weather: Kp ${state.data.kp} ${state.data.kp >= 5 ? '(storm, auroras likely)' : '(quiet)'}`;
 }
 
 async function quakeCount(area, days, minMag) {
@@ -448,7 +546,7 @@ async function regionData(level) {
     rows.push(`Hottest ${fmt(hot.current.temperature_2m)}°C at ${where(hot)}`, `Coolest ${fmt(cold.current.temperature_2m)}°C at ${where(cold)}`,
       `Windiest ${fmt(windy.current.wind_speed_10m)} km/h at ${where(windy)}`, `Cloud cover ${fmt(cloud)}% · raining at ${raining} of ${pts.length} points`);
   }
-  rows.push(`Earthquakes, 7 days: ${await quakeCount(boxArea(box), 7, level === 'continent' ? 4.5 : 3)}`);
+  rows.push(`Earthquakes, 7 days: ${await quakeCount(boxArea(box), 7, level === 'continent' ? 4.5 : 3)}`, await kpLine());
   const ev = await json(`https://eonet.gsfc.nasa.gov/api/v3/events?${qs({ status: 'open', days: 30, bbox: `${w},${n},${e},${s}` })}`).catch(() => ({ events: [] }));
   const side = ev.events.slice(0, 8).map((x) => [x.categories[0]?.title.split(' ')[0].toUpperCase().slice(0, 8) || 'EVENT', x.title.slice(0, 34)]);
   return { rows, sideTitle: `NATURAL EVENTS (${ev.events.length})`, side: side.length ? side : [['—', 'no open events in this area']] };
@@ -496,29 +594,13 @@ async function showData() {
   renderNews();
   $('rows').replaceChildren(el('div', 'row dim', 'loading …'));
   $('sideRows').replaceChildren();
-  renderGauge(null);
   try {
     const d = level === 'city' ? await cityData(p) : level === 'earth' ? await earthData() : await regionData(level);
     if (token !== dataToken) return;
     $('rows').replaceChildren(...d.rows.map((r) => el('div', 'row', esc(r))));
     $('sideTitle').textContent = d.sideTitle;
     $('sideRows').replaceChildren(...d.side.map(([k, v]) => el('div', 'row', `<b>${esc(k)}</b>${esc(v)}`)));
-    renderGauge(d.soil);
   } catch (e) { console.warn(e); $('rows').textContent = 'data not available right now'; }
-  renderDataLine();
-}
-
-// Ground water: soil moisture by depth, as water tubes (0.5 m³/m³ is about full for most soils).
-function renderGauge(soil) {
-  const g = $('gauge');
-  if (!soil) { g.replaceChildren(); return; }
-  g.replaceChildren(...soil.map(([depth, v]) => {
-    const t = el('div', 'tube');
-    const pct = Math.max(0, Math.min(100, (v ?? 0) / 0.5 * 100));
-    t.innerHTML = `<div class="val">${v == null ? '—' : Math.round(v * 100) + '%'}</div><div class="glass"><div class="water" style="height:${pct}%"></div></div>${depth}`;
-    return t;
-  }));
-  g.prepend(el('div', 'row mono', 'GROUND<br>WATER'));
 }
 
 // ---------- the bottom lines ----------
@@ -548,36 +630,27 @@ function scrollNews(ms) {
   $('newsText').style.transform = `translateX(${newsX}px)`;
 }
 
-async function renderDataLine() {
-  const tiles = [];
-  try {
-    const [fx, gold, silver] = await Promise.all([json('https://open.er-api.com/v6/latest/USD'), json('https://api.gold-api.com/price/XAU'), json('https://api.gold-api.com/price/XAG')]);
-    const inr = fx.rates.INR;
-    tiles.push(['GOLD 24K', `₹${fmt(gold.price * inr / 31.1035 * 10)}/10g`], ['SILVER', `₹${fmt(silver.price * inr / 31.1035 * 1000)}/kg`], ['USD/INR', inr.toFixed(2)]);
-  } catch { /* prices offline */ }
-  if (state.data.temp != null) tiles.push(['TEMP', `${fmt(state.data.temp)}°C`]);
-  if (state.data.aqi != null) tiles.push(['AQI', `${fmt(state.data.aqi)} ${aqiName(state.data.aqi)}`]);
-  if (state.data.kp == null) {
-    const kp = await json('https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json').catch(() => null);
-    if (kp) state.data.kp = Number(Array.isArray(last(kp)) ? last(kp)[1] : last(kp).Kp);
-  }
-  if (state.data.kp != null) tiles.push(['KP', String(state.data.kp)]);
-  tiles.push(['SPOT PRICES', 'world market, before Indian tax']);
-  $('dataLine').replaceChildren(...tiles.map(([k, v]) => el('div', 'tile', `<b>${esc(k)}</b>${esc(v)}`)));
-}
-
 // ---------- clock, ladder, dots ----------
+
+// A calculator digit: 7 segments; the unlit ones glow faintly, so every digit shows its "8".
+const SEGMENTS = { a: [10, 2, 20, 6], b: [31, 9, 6, 23], c: [31, 42, 6, 23], d: [10, 66, 20, 6], e: [3, 42, 6, 23], f: [3, 9, 6, 23], g: [10, 34, 20, 6] };
+const DIGITS = { 0: 'abcdef', 1: 'bc', 2: 'abged', 3: 'abgcd', 4: 'fgbc', 5: 'afgcd', 6: 'afgedc', 7: 'abc', 8: 'abcdefg', 9: 'abcdfg' };
+function digitSvg(ch) {
+  if (ch === ':') return '<svg viewBox="0 0 16 74" class="colon"><circle cx="8" cy="24" r="3.5"/><circle cx="8" cy="52" r="3.5"/></svg>';
+  const on = DIGITS[ch] || '';
+  return `<svg viewBox="0 0 40 74"><g transform="skewX(-4) translate(3 0)">${Object.entries(SEGMENTS).map(([k, [x, y, w, h]]) =>
+    `<rect class="${on.includes(k) ? 'on' : 'off'}" x="${x}" y="${y}" width="${w}" height="${h}" rx="2.5"/>`).join('')}</g></svg>`;
+}
 
 let lastTime = '';
 function tickClock() {
   const tz = state.data.tz, now = new Date();
   const time = now.toLocaleTimeString('en-GB', { timeZone: tz, hour12: false });
   if (time !== lastTime) {
-    const spans = $('time').children;
-    if (spans.length !== time.length) $('time').replaceChildren(...[...time].map((ch) => el('span', '', ch)));
+    if ($('time').children.length !== time.length) $('time').replaceChildren(...[...time].map(() => el('span')));
     [...time].forEach((ch, i) => {
       const s = $('time').children[i];
-      if (s.textContent !== ch) { s.textContent = ch; s.classList.remove('tick'); void s.offsetWidth; s.classList.add('tick'); }
+      if (s.dataset.ch !== ch) { s.dataset.ch = ch; s.innerHTML = digitSvg(ch); s.classList.remove('tick'); void s.offsetWidth; s.classList.add('tick'); }
     });
     lastTime = time;
     const date = now.toLocaleDateString('en-GB', { timeZone: tz, weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' }).toUpperCase();
@@ -624,6 +697,7 @@ document.addEventListener('keydown', (e) => {
   else if (k === 'ArrowDown') goLevel(state.level - 1);
   else if (k === 'ArrowRight') goView(state.view + 1);
   else if (k === 'ArrowLeft') goView(state.view - 1);
+  else if (k === 'Enter' || k === 'w' || k === 'W') toggleWeather();
   else if (k === 's' || k === 'S') { $('setup').hidden = false; $('setupCity').focus(); }
   else return;
   e.preventDefault();
@@ -669,7 +743,7 @@ async function boot() {
   setInterval(() => { if (state.place) showData(); }, 10 * 60e3);                 // fresh data every 10 minutes
   setInterval(async () => { await loadNews(); if (state.place) renderNews(); }, 15 * 60e3);
   setInterval(() => {                                                                 // like a screensaver: next picture
-    if (state.place && Date.now() - state.lastKey > 2 * 60e3 && state.views[state.view]?.kind !== 'loop') goView(state.view + 1);
+    if (state.place && !state.weather && Date.now() - state.lastKey > 2 * 60e3 && state.views[state.view]?.kind !== 'loop') goView(state.view + 1);
   }, AUTO_VIEW_MS);
   if (!state.news) await loadNews();
   try {
