@@ -156,7 +156,9 @@ async function loopTimes(box, src) {
     : new Date(Math.floor((Date.now() - 50 * 60e3) / step) * step);
   const times = [];
   for (let t = newest.getTime(); times.length < LOOP_FRAMES && t > newest - 30 * 3600e3; t -= step) {
-    if (sunPosition(cLat, cLon, new Date(t)).el >= 8) times.push(new Date(t));
+    // the sun must be up over the whole view, not just its middle (no half-dark sunset pictures)
+    const at = new Date(t);
+    if ([box[1], cLon, box[3]].every((lon) => sunPosition(cLat, lon, at).el >= 8)) times.push(at);
   }
   return times.reverse();
 }
@@ -322,6 +324,7 @@ function stopLoop() { clearInterval(state.loop); state.loop = null; }
 
 // A thin, see-through rifle-scope reticle on the place, plus a separate bright line straight through it.
 function drawReticle(target, scale) {
+  state.reticle = [target, scale];   // redrawn when the height above sea level arrives
   const c = $('reticle'), g = c.getContext('2d');
   g.clearRect(0, 0, W, H);
   const { x, y } = target, ring = 300 * scale, gap = 26 * scale;
@@ -375,7 +378,9 @@ async function cityData(p) {
       + 'cloud_cover,visibility,uv_index,surface_pressure,pressure_msl,dew_point_2m,precipitation',
     hourly: 'soil_moisture_0_to_1cm,soil_moisture_1_to_3cm,soil_moisture_3_to_9cm,soil_moisture_9_to_27cm,soil_moisture_27_to_81cm',
     daily: 'sunrise,sunset,temperature_2m_max,temperature_2m_min,uv_index_max' })}`);
+  const firstHeight = state.data.elevation == null;
   state.data.elevation = wx.elevation;
+  if (firstHeight && state.reticle) drawReticle(...state.reticle);
   state.data.tz = wx.timezone; state.data.tzOffset = wx.utc_offset_seconds;
   const c = wx.current, d = wx.daily, now = new Date();
   const hour = wx.hourly.time.indexOf(c.time.slice(0, 13) + ':00');
