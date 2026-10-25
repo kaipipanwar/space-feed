@@ -26,7 +26,7 @@ body { color: var(--text); font: 26px "Rajdhani", system-ui, sans-serif; }
 
 .panel { position: absolute; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px 22px; }
 #info { left: 40px; top: 36px; min-width: 560px; max-width: 640px; }
-#side { right: 40px; top: 170px; width: 470px; }
+#side { right: 40px; top: 190px; width: 470px; }
 h1, h2 { margin: 0; color: var(--neon); font-weight: 700; letter-spacing: 2px; }
 h1 { font-size: 46px; line-height: 1; }
 h2 { font-size: 28px; margin-bottom: 8px; }
@@ -39,15 +39,18 @@ h2 { font-size: 28px; margin-bottom: 8px; }
 #frameTime { margin-top: 10px; font: 34px "Share Tech Mono", monospace; color: var(--neon); }
 
 /* Animated clock: each digit slides when it changes. */
-#clock { position: absolute; right: 40px; top: 28px; text-align: right; }
+#clock { position: absolute; right: 40px; top: 20px; text-align: right; background: rgba(0, 0, 0, 0.62); border: 1px solid var(--line);
+  border-radius: 14px; padding: 12px 18px 10px; }
 #time { display: flex; justify-content: flex-end; gap: 5px; height: 74px; filter: drop-shadow(0 0 8px rgba(57, 255, 20, 0.7)); }
 #time span { display: inline-block; }
 #time svg { height: 74px; width: 40px; display: block; }
 #time svg.colon { width: 16px; fill: var(--neon); }
-#time rect.on { fill: var(--neon); }
+#time rect.on { fill: var(--neon); stroke: #000; stroke-width: 2.5; paint-order: stroke; }
+#time svg.colon circle { stroke: #000; stroke-width: 2; paint-order: stroke; }
 #time span.tick { animation: tick 0.45s ease; }
 @keyframes tick { from { transform: translateY(-40%); opacity: 0; } to { transform: none; opacity: 1; } }
-#date { margin-top: 8px; font: 700 30px "Rajdhani", sans-serif; color: var(--text); letter-spacing: 3px; text-shadow: 0 0 6px rgba(0,0,0,0.9); }
+#date { margin-top: 8px; font: 700 30px "Rajdhani", sans-serif; color: var(--text); letter-spacing: 3px;
+  text-shadow: -2px 0 #000, 2px 0 #000, 0 -2px #000, 0 2px #000, 0 0 8px #000; }
 #date b { color: var(--neon); }
 #date .utc { font: 20px "Share Tech Mono", monospace; color: var(--dim); letter-spacing: 1px; }
 

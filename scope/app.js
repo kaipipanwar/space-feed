@@ -380,6 +380,8 @@ async function drawWeather(view) {
   if (!view) return;
   const level = LEVELS[state.level];
   if (level === 'earth') { $('weatherTag').textContent = 'WEATHER: zoom in (↓) for the weather layer'; return; }
+  // The live loop already shows the real clouds moving; the weather layer would only cover them.
+  if (view.kind === 'loop') { $('weatherTag').textContent = 'WEATHER: the live loop shows the real clouds (← → for the weather layer)'; return; }
   const box = view.box;
   $('weatherTag').innerHTML = 'WEATHER ON · <b>heat</b> <span class="scale"></span> · wind and rain: live · NASA rain map: a few hours old';
   rain.onload = () => { if (token === weatherToken) rain.classList.add('on'); };
@@ -793,6 +795,7 @@ function setFacing(deg) {
 
 // A calculator digit: only the lit segments of the 7 are drawn.
 const SEGMENTS = { a: [10, 1, 20, 8], b: [30, 8, 8, 25], c: [30, 41, 8, 25], d: [10, 65, 20, 8], e: [2, 41, 8, 25], f: [2, 8, 8, 25], g: [10, 33, 20, 8] };
+// (each lit segment has a black outline, so the digits stand out on bright pictures)
 const DIGITS = { 0: 'abcdef', 1: 'bc', 2: 'abged', 3: 'abgcd', 4: 'fgbc', 5: 'afgcd', 6: 'afgedc', 7: 'abc', 8: 'abcdefg', 9: 'abcdfg' };
 function digitSvg(ch) {
   if (ch === ':') return '<svg viewBox="0 0 16 74" class="colon"><circle cx="8" cy="24" r="3.5"/><circle cx="8" cy="52" r="3.5"/></svg>';
