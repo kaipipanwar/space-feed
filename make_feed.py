@@ -56,11 +56,12 @@ GIBS_LAYERS = (("MODIS_Terra_CorrectedReflectance_TrueColor", "NASA Terra MODIS"
                ("VIIRS_NOAA20_CorrectedReflectance_TrueColor", "NASA/NOAA NOAA-20 VIIRS", 13.6),
                ("VIIRS_NOAA21_CorrectedReflectance_TrueColor", "NASA/NOAA NOAA-21 VIIRS", 13.7))
 CLOSE_SPANS = ((1.5, 2.67, "close"), (3.5, 6.22, "area"))
-DAILY_PHOTOS = 2                                 # newest daily pictures kept per zoom
+DAILY_PHOTOS = 1                                 # only the newest daily picture per zoom
 
 EPIC_MAX_OFFSET = 30                             # degrees of longitude between the photo centre and the place
 
-RED = (255, 48, 48)
+NEON = (57, 255, 20)                             # neon green: titles, reticle, labels
+TEXT = (200, 255, 210)                           # pale green: panel text
 PANEL = (0, 0, 0, 150)
 TICKER_H, TICKER_SPEED = 64, 150                 # news strip height (px) and scroll speed (px per second)
 
@@ -85,15 +86,27 @@ def bbox(lat, lon, span):
     return f"{lat - span[0] / 2},{lon - span[1] / 2},{lat + span[0] / 2},{lon + span[1] / 2}"
 
 
-def sun_elevation(lat, lon, when):
-    """Height of the sun above the horizon in degrees (good to about one degree)."""
+def sun_position(lat, lon, when):
+    """The sun's height above the horizon and its compass direction, in degrees (good to about one degree)."""
     day = when.timetuple().tm_yday
     hour = when.hour + when.minute / 60
     decl = math.radians(-23.44) * math.cos(2 * math.pi / 365 * (day + 10))
     hour_angle = math.radians(15 * (hour + lon / 15 - 12))
     lat = math.radians(lat)
-    return math.degrees(math.asin(math.sin(lat) * math.sin(decl)
-                                  + math.cos(lat) * math.cos(decl) * math.cos(hour_angle)))
+    elevation = math.asin(math.sin(lat) * math.sin(decl) + math.cos(lat) * math.cos(decl) * math.cos(hour_angle))
+    azimuth = math.atan2(math.sin(hour_angle), math.cos(hour_angle) * math.sin(lat) - math.tan(decl) * math.cos(lat))
+    return math.degrees(elevation), (math.degrees(azimuth) + 180) % 360
+
+
+def sun_elevation(lat, lon, when):
+    return sun_position(lat, lon, when)[0]
+
+
+def density_altitude(pressure_hpa, temp_c):
+    """How high the air "feels" to a bullet or a plane: pressure altitude corrected for heat (metres)."""
+    pressure_alt_ft = (1 - (pressure_hpa / 1013.25) ** 0.190284) * 145366.45
+    isa_c = 15 - 1.98 * pressure_alt_ft / 1000
+    return (pressure_alt_ft + 118.8 * (temp_c - isa_c)) * 0.3048
 
 
 def distance_km(lat1, lon1, lat2, lon2):
@@ -146,7 +159,7 @@ def facts(lat, lon, now):
         wx = get_json("https://api.open-meteo.com/v1/forecast", {
             "latitude": lat, "longitude": lon, "timezone": "Asia/Kolkata", "forecast_days": 1, "wind_speed_unit": "kmh",
             "current": "temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,wind_direction_10m,"
-                       "cloud_cover,visibility,uv_index",
+                       "cloud_cover,visibility,uv_index,surface_pressure,pressure_msl,dew_point_2m,wind_gusts_10m",
             "daily": "sunrise,sunset,temperature_2m_max,temperature_2m_min,uv_index_max"})
         c, d = wx["current"], wx["daily"]
         out["elevation"] = wx.get("elevation")
@@ -157,6 +170,17 @@ def facts(lat, lon, now):
             f"Cloud {c['cloud_cover']:.0f}% · visibility {c['visibility'] / 1000:.0f} km",
             f"UV now {c['uv_index']:.0f}, today's peak {d['uv_index_max'][0]:.0f}",
             f"Sunrise {d['sunrise'][0][-5:]} · sunset {d['sunset'][0][-5:]}"]
+        elev, azim = sun_position(lat, lon, now)
+        out["scope"] = [
+            f"WIND   {c['wind_speed_10m'] / 3.6:.1f} m/s · {c['wind_direction_10m']:03.0f}° {compass(c['wind_direction_10m'])}",
+            f"GUSTS  {c['wind_gusts_10m'] / 3.6:.1f} m/s",
+            f"TEMP   {c['temperature_2m']:.1f}°C · DEW {c['dew_point_2m']:.1f}°C",
+            f"HUMID  {c['relative_humidity_2m']:.0f}%",
+            f"PRESS  {c['surface_pressure']:.0f} hPa stn · {c['pressure_msl']:.0f} MSL",
+            f"DENS ALT  {density_altitude(c['surface_pressure'], c['temperature_2m']):,.0f} m",
+            f"VIS    {c['visibility'] / 1000:.1f} km",
+            f"SUN    az {azim:03.0f}° · el {elev:+.0f}°",
+            f"MOON   {moon(now)}"]
     except Exception as e:
         print(f"  weather failed ({e})")
     try:
@@ -211,9 +235,9 @@ def crosshair(layer, x, y, scale=1.0):
     """A duplex rifle-scope reticle: thick posts outside, thin lines inside, a gap and dot in the middle."""
     d = ImageDraw.Draw(layer)
     ring, gap = int(300 * scale), int(26 * scale)
-    shadow, red = (0, 0, 0, 110), RED + (190,)
-    for colour, grow in ((shadow, 2), (red, 0)):
-        thick, thin = 4 + grow, 2 + grow
+    shadow, neon = (0, 0, 0, 45), NEON + (95,)
+    for colour, grow in ((shadow, 1), (neon, 0)):
+        thick, thin = 3 + grow, 1 + grow
         for sx, sy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             far = 2000
             d.line((x + sx * ring, y + sy * ring, x + sx * far, y + sy * far), fill=colour, width=thick)
@@ -225,7 +249,8 @@ def crosshair(layer, x, y, scale=1.0):
                 else:
                     d.line((x - 9 * scale, y + sy * r, x + 9 * scale, y + sy * r), fill=colour, width=thin)
         d.ellipse((x - ring, y - ring, x + ring, y + ring), outline=colour, width=thin)
-        d.ellipse((x - 4 - grow, y - 4 - grow, x + 4 + grow, y + 4 + grow), fill=colour)
+    d.ellipse((x - 6, y - 6, x + 6, y + 6), outline="black", width=2)   # the centre dot stays solid
+    d.ellipse((x - 4, y - 4, x + 4, y + 4), fill=NEON + (255,))
 
 
 def hud(place, lat, lon, info, source, target=CENTRE, scale=1.0):
@@ -237,7 +262,7 @@ def hud(place, lat, lon, info, source, target=CENTRE, scale=1.0):
     tag = f"{abs(lat):.2f}°{ns} {abs(lon):.2f}°{ew}"
     if info.get("elevation") is not None:
         tag += f" · {info['elevation']:.0f} m"
-    d.text((target[0] + 22, target[1] - 52), tag, font=font(28, True), fill=RED, stroke_width=3, stroke_fill="black")
+    d.text((target[0] + 22, target[1] - 52), tag, font=font(28, True), fill=NEON, stroke_width=3, stroke_fill="black")
 
     lines = [(place.upper(), font(40, True)), (tag, font(26)), (source, font(24))]
     # (the top-right corner stays free for the TV's own clock)
@@ -248,14 +273,28 @@ def hud(place, lat, lon, info, source, target=CENTRE, scale=1.0):
     width = max(d.textlength(t, font=f) for t, f in lines) + 2 * pad
     d.rounded_rectangle((x0, y0, x0 + width, y0 + height), radius=14, fill=PANEL)
     d.line((x0 + pad, y0 + pad + 40 + 26 + 24 + 3 * gap + 4, x0 + width - pad, y0 + pad + 40 + 26 + 24 + 3 * gap + 4),
-           fill=RED + (200,), width=2)
+           fill=NEON + (200,), width=2)
     y = y0 + pad
     for i, (text, f) in enumerate(lines):
         if i == 3:
             y += 8
-        d.text((x0 + pad, y), text, font=f, fill=RED if i == 0 else "white")
+        d.text((x0 + pad, y), text, font=f, fill=NEON if i == 0 else TEXT)
         y += f.size + gap
     layer.time_xy = (x0 + 4, int(y0 + height + 16))
+
+    # Scope data on the right, under the TV's clock, like a ballistic computer.
+    if info.get("scope"):
+        f, title = font(24), font(26, True)
+        rows = info["scope"]
+        width = max(d.textlength(t, font=f) for t in rows) + 2 * pad
+        height = title.size + 14 + len(rows) * (f.size + 8) + 2 * pad
+        x1, y1 = W - 40 - width, 130
+        d.rounded_rectangle((x1, y1, x1 + width, y1 + height), radius=14, fill=PANEL, outline=NEON + (90,), width=1)
+        d.text((x1 + pad, y1 + pad), "SCOPE DATA", font=title, fill=NEON)
+        y = y1 + pad + title.size + 14
+        for text in rows:
+            d.text((x1 + pad, y), text, font=f, fill=TEXT)
+            y += f.size + 8
     return layer
 
 
@@ -275,8 +314,8 @@ def news_label(img, place):
     f = font(28, True)
     label = f"{place.upper()} NEWS"
     width = int(d.textlength(label, font=f)) + 40
-    d.rectangle((0, H - TICKER_H, width, H), fill=(190, 20, 20))
-    d.text((20, H - TICKER_H + (TICKER_H - 34) // 2), label, font=f, fill="white")
+    d.rectangle((0, H - TICKER_H, width, H), fill=NEON)
+    d.text((20, H - TICKER_H + (TICKER_H - 34) // 2), label, font=f, fill="black")
     return width
 
 
@@ -297,7 +336,7 @@ def still_news(img, place, headlines):
 
 def picture_time(img, text, xy):
     """When the picture was taken, just under the info panel."""
-    ImageDraw.Draw(img).text(xy, text, font=font(40, True), fill="white", stroke_width=3, stroke_fill="black")
+    ImageDraw.Draw(img).text(xy, text, font=font(40, True), fill=NEON, stroke_width=3, stroke_fill="black")
 
 
 def finish_photo(img, layer, place, headlines, when_text, path):
@@ -434,7 +473,8 @@ def on_globe(img, lat, lon, centre_lat, centre_lon):
 def epic(lat, lon, place, info, headlines, out, stamp):
     """NASA EPIC whole-Earth photos from the newest day, taken while the place faced the camera."""
     photos = get_json("https://epic.gsfc.nasa.gov/api/natural")
-    near = [p for p in photos if abs((p["centroid_coordinates"]["lon"] - lon + 180) % 360 - 180) <= EPIC_MAX_OFFSET]
+    offset = lambda p: abs((p["centroid_coordinates"]["lon"] - lon + 180) % 360 - 180)
+    near = sorted((p for p in photos if offset(p) <= EPIC_MAX_OFFSET), key=offset)[:1]  # the one facing it most
     items = []
     for n, p in enumerate(near):
         taken = datetime.strptime(p["date"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
