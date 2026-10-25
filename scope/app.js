@@ -3,6 +3,8 @@
 // layer on/off, S = change place (and which way you face when you look at the screen, for the compass).
 // Levels: HERE (your exact spot, closest map + live traffic) -> city -> state -> country -> continent -> Earth.
 // Settings in the address, kept only in this browser: ?facing=<degrees> ?here=<lat>,<lon> ?tomtom=<free TomTom key>
+// Also: live flights (through the TV app or the PC helper, see fetchHome), satellites passing over (satellite.js),
+// rocket launches at the Earth level, and local radio (R or the remote's play/pause key).
 // All data comes from free public services that allow web pages to read them; news.json is made by the
 // GitHub Action (make_news.py), because news feeds do not allow that.
 'use strict';
@@ -122,6 +124,20 @@ function centreOn([s, w, n, e], lat, lon) {
 }
 
 const wmsBox = ([s, w, n, e]) => `${s},${w},${n},${e}`;   // WMS 1.3.0 with EPSG:4326 wants lat,lon order
+
+// Some live services (flights) welcome a home connection but not web pages (no CORS). The TV app fetches them for
+// the page (window.EarthScopeNative); on the PC the desktop icon starts a small helper on this computer (port 8771).
+const homeWaits = new Map();
+let homeId = 0;
+window.earthScopeDone = (id, text) => { const w = homeWaits.get(id); homeWaits.delete(id); if (w) w(text); };
+async function fetchHome(url) {
+  if (window.EarthScopeNative) {
+    const text = await new Promise((ok) => { const id = ++homeId; homeWaits.set(id, ok); window.EarthScopeNative.get(id, url); });
+    if (!text) throw new Error('no answer');
+    return JSON.parse(text);
+  }
+  return json(`http://127.0.0.1:8771/get?${qs({ url })}`);
+}
 
 // ---------- the place ----------
 
@@ -457,6 +473,184 @@ function showTraffic(box) {
   if (!key) { status('traffic: needs a free TomTom key (see README)'); return; }
   tilesOver(box, 18, (z, x, y) => `https://api.tomtom.com/traffic/map/4/tile/flow/relative0/${z}/${x}/${y}.png?tileSize=256&key=${encodeURIComponent(key)}`, $('tiles'));
   setSource('Esri World Imagery (sharpest photos, not live) · live traffic © TomTom');
+}
+
+// ---------- live flights ----------
+
+const sky = { flights: [], flightsAt: 0, flightSource: '', sats: [], satRecs: null, lib: null, radio: -1, stations: [], radioFails: 0 };
+
+// Planes within 250 nautical miles (about 460 km) of the place: adsb.fi, else adsb.lol (both run by volunteers).
+async function loadFlights() {
+  const f = focus(), lat = f.lat.toFixed(3), lon = f.lon.toFixed(3);
+  for (const [name, url] of [['adsb.fi', `https://opendata.adsb.fi/api/v2/lat/${lat}/lon/${lon}/dist/250`],
+    ['adsb.lol', `https://api.adsb.lol/v2/point/${lat}/${lon}/250`]]) {
+    try {
+      const d = await fetchHome(url);
+      sky.flights = (d.aircraft || d.ac || []).filter((a) => Number.isFinite(a.lat) && Number.isFinite(a.lon)).map((a) => ({
+        call: (a.flight || '').trim() || a.hex, type: a.t || '', lat: a.lat, lon: a.lon, ground: a.alt_baro === 'ground',
+        alt: a.alt_baro === 'ground' ? 0 : (a.alt_baro ?? a.alt_geom ?? 0), gs: a.gs || 0, track: a.track ?? a.true_heading ?? 0 }));
+      sky.flightsAt = Date.now(); sky.flightSource = name;
+      updateSkyRows();
+      return;
+    } catch { /* try the next service */ }
+  }
+  sky.flightSource = window.EarthScopeNative ? 'not reachable' : 'open Earth Scope from the desktop icon or the TV app';
+  updateSkyRows();
+}
+
+// Where a plane is now: moved on from its last report by its speed and track (dead reckoning).
+function planeNow(a, now) {
+  const hours = (now - sky.flightsAt) / 3600e3, km = a.gs * 1.852 * hours, t = rad(a.track);
+  return { lat: a.lat + km * Math.cos(t) / 111, lon: a.lon + km * Math.sin(t) / (111 * Math.cos(rad(a.lat))) };
+}
+
+// ---------- satellites passing over (CelesTrak orbits, satellite.js) ----------
+
+async function loadSatellites() {
+  let tle = null;
+  try { const c = JSON.parse(localStorage.getItem('earthscope.tle')); if (c && Date.now() - c.at < 4 * 3600e3) tle = c.text; } catch { /* fine */ }
+  if (!tle) {   // CelesTrak asks for each list at most every few hours
+    tle = await (await fetch('https://celestrak.org/NORAD/elements/gp.php?GROUP=visual&FORMAT=tle')).text();
+    try { localStorage.setItem('earthscope.tle', JSON.stringify({ at: Date.now(), text: tle })); } catch { /* fine */ }
+  }
+  sky.lib = sky.lib || await import('https://cdn.jsdelivr.net/npm/satellite.js@7.1.0/+esm');
+  const lines = tle.split(/\r?\n/).map((l) => l.trim()).filter(Boolean), recs = [];
+  for (let i = 0; i + 2 < lines.length; i += 3) {
+    try { recs.push({ name: lines[i], rec: sky.lib.twoline2satrec(lines[i + 1], lines[i + 2]) }); } catch { /* skip a bad one */ }
+  }
+  sky.satRecs = recs;
+  moveSatellites();
+}
+
+// Every satellite's point on Earth and, seen from the place, its direction and height.
+function moveSatellites() {
+  if (!sky.satRecs || !sky.lib) return;
+  const L = sky.lib, now = new Date(), gmst = L.gstime(now), f = focus();
+  const observer = { latitude: L.degreesToRadians(f.lat), longitude: L.degreesToRadians(f.lon), height: (state.data.elevation || 0) / 1000 };
+  sky.sats = [];
+  for (const { name, rec } of sky.satRecs) {
+    const r = L.propagate(rec, now);
+    if (!r || !r.position) continue;
+    const gd = L.eciToGeodetic(r.position, gmst), look = L.ecfToLookAngles(observer, L.eciToEcf(r.position, gmst));
+    sky.sats.push({ name: name.replace(/\s+/g, ' ').trim(), lat: deg(gd.latitude), lon: deg(gd.longitude), height: gd.height,
+      el: deg(look.elevation), az: (deg(look.azimuth) + 360) % 360, iss: /ISS \(ZARYA\)/.test(name) });
+  }
+}
+
+// The two live lines in the info panel: planes and satellites.
+function updateSkyRows() {
+  const f = focus(), rows = [];
+  if (sky.flightsAt) {
+    const air = sky.flights.filter((a) => !a.ground);
+    const near = air.map((a) => ({ a, km: distanceKm(f.lat, f.lon, a.lat, a.lon) })).sort((x, y) => x.km - y.km)[0];
+    rows.push(`Planes within 460 km: ${air.length}${near ? ` · nearest ${near.a.call} ${near.a.type} ${fmt(near.km)} km, ${fmt(near.a.alt * 0.3048)} m up` : ''} (${sky.flightSource})`);
+  } else if (sky.flightSource) rows.push(`Planes: ${sky.flightSource}`);
+  const up = sky.sats.filter((x) => x.el > 10);
+  if (sky.satRecs) {
+    const iss = sky.sats.find((x) => x.iss);
+    rows.push(`Satellites above you now: ${up.length} of ${sky.sats.length} bright ones${iss && iss.el > 0 ? ` · ISS ${Math.round(iss.el)}° high!` : ''}`);
+  }
+  const box = $('skyRows');
+  if (box) box.replaceChildren(...rows.map((r) => el('div', 'row live', esc(r))));
+}
+
+// Planes and satellites drawn over the picture (moving smoothly between updates).
+let lastSkyDraw = 0;
+function drawSky(now) {
+  if (now - lastSkyDraw < 100) return;   // 10 times a second is smooth enough and kind to the TV
+  lastSkyDraw = now;
+  const g = $('skyLayer').getContext('2d');
+  g.clearRect(0, 0, W, H);
+  const view = state.views[state.view];
+  if (!view || view.kind === 'globe' || !state.place) return;
+  const at = (lat, lon) => {
+    if (LEVELS[state.level] === 'earth') {   // the centred world map
+      const mapH = W / 2, dy = H / 2 - ((H - mapH) / 2 + (90 - state.place.lat) / 180 * mapH);
+      return { x: (((lon - state.place.lon + 540) % 360) - 180) / 360 * W + W / 2, y: (H - mapH) / 2 + (90 - lat) / 180 * mapH + dy };
+    }
+    return onScreen(view.box, lat, lon);
+  };
+  const inside = ({ x, y }) => x > -20 && x < W + 20 && y > -20 && y < H + 20;
+  // satellites: small cyan dots with their name (the space station in gold)
+  g.font = '600 15px "Share Tech Mono", monospace'; g.textAlign = 'left';
+  for (const sat of sky.sats) {
+    const p = at(sat.lat, sat.lon);
+    if (!inside(p)) continue;
+    g.fillStyle = sat.iss ? '#ffd34d' : 'rgba(120,230,255,0.85)';
+    g.beginPath(); g.arc(p.x, p.y, sat.iss ? 5 : 2.5, 0, Math.PI * 2); g.fill();
+    const junk = /R\/B|DEB|ROCKET/.test(sat.name);   // spent rocket stages and debris stay nameless dots
+    if (sat.iss || (!junk && LEVELS[state.level] !== 'earth')) g.fillText(sat.iss ? 'ISS' : sat.name.slice(0, 14), p.x + 6, p.y - 4);
+  }
+  // planes: a small white plane pointing where it flies, with its flight number and height
+  const t = Date.now(), close = ['here', 'city', 'state'].includes(LEVELS[state.level]);
+  for (const a of sky.flights) {
+    if (a.ground) continue;
+    const pos = planeNow(a, t), p = at(pos.lat, pos.lon);
+    if (!inside(p)) continue;
+    if (!close) {   // zoomed far out the planes would pile up: just small white dots
+      g.fillStyle = '#ffffff'; g.beginPath(); g.arc(p.x, p.y, 2.2, 0, Math.PI * 2); g.fill();
+      continue;
+    }
+    g.save(); g.translate(p.x, p.y); g.rotate(rad(a.track));
+    g.fillStyle = '#ffffff'; g.strokeStyle = 'rgba(0,0,0,0.7)'; g.lineWidth = 1.5;
+    g.beginPath(); g.moveTo(0, -10); g.lineTo(2, -3); g.lineTo(9, 2); g.lineTo(9, 4); g.lineTo(2, 2); g.lineTo(1.5, 7); g.lineTo(4, 9);
+    g.lineTo(-4, 9); g.lineTo(-1.5, 7); g.lineTo(-2, 2); g.lineTo(-9, 4); g.lineTo(-9, 2); g.lineTo(-2, -3); g.closePath();
+    g.stroke(); g.fill(); g.restore();
+    g.fillStyle = '#fff'; g.font = '600 14px "Share Tech Mono", monospace';
+    g.lineWidth = 3; g.strokeStyle = 'rgba(0,0,0,0.75)';
+    const label = `${a.call} ${a.alt ? Math.round(a.alt / 100).toString().padStart(3, '0') : ''}`;
+    g.strokeText(label, p.x + 12, p.y + 4); g.fillText(label, p.x + 12, p.y + 4);
+  }
+}
+
+// ---------- rocket launches (The Space Devs, Launch Library 2) ----------
+
+async function nextLaunches() {
+  let list = null;
+  try { const c = JSON.parse(localStorage.getItem('earthscope.launches')); if (c && Date.now() - c.at < 30 * 60e3) list = c.list; } catch { /* fine */ }
+  if (!list) {   // the free service allows 15 questions an hour
+    const d = await json('https://ll.thespacedevs.com/2.3.0/launches/upcoming/?limit=10&mode=list');
+    list = d.results.map((r) => ({ name: r.name, net: r.net, status: r.status?.abbrev || '' }));
+    try { localStorage.setItem('earthscope.launches', JSON.stringify({ at: Date.now(), list })); } catch { /* fine */ }
+  }
+  return list.filter((r) => new Date(r.net) > Date.now() - 3600e3).slice(0, 7);
+}
+
+function countdown(when) {   // T-4d, T-36h, T-25m
+  const ms = new Date(when) - Date.now();
+  if (ms < 0) return 'NOW';
+  const h = Math.floor(ms / 3600e3), d = Math.floor(h / 24);
+  return d >= 2 ? `T-${d}d` : h >= 1 ? `T-${h}h` : `T-${Math.floor(ms / 60e3)}m`;
+}
+
+// ---------- local radio (Radio Browser) ----------
+
+// R (or play/pause on the remote) goes: off -> first station -> next station ... -> off.
+async function nextRadio() {
+  const audio = $('radio');
+  if (!sky.stations.length) {
+    const p = state.place, found = [];
+    for (const query of [{ state: p.state }, { country: p.country, language: 'hindi', order: 'votes', reverse: 'true' }]) {
+      for (const host of ['de1', 'de2']) {
+        try {
+          const list = await json(`https://${host}.api.radio-browser.info/json/stations/search?${qs({ ...query, hidebroken: 'true', limit: 15 })}`);
+          found.push(...list.filter((x) => x.url_resolved.startsWith('https://')));   // only streams a secure page may play
+          break;
+        } catch { /* the other mirror */ }
+      }
+    }
+    sky.stations = found.filter((x, i, all) => all.findIndex((y) => y.name === x.name) === i).slice(0, 12);
+  }
+  sky.radio = sky.radio + 1 >= sky.stations.length ? -1 : sky.radio + 1;
+  if (sky.radio < 0) { audio.pause(); audio.removeAttribute('src'); $('radioTag').hidden = true; return; }
+  const st = sky.stations[sky.radio];
+  audio.src = st.url_resolved;
+  // a station that does not play (e.g. a stream type this browser lacks) is skipped, at most once round the list
+  audio.onerror = () => { if (++sky.radioFails < sky.stations.length) nextRadio(); };
+  audio.onplaying = () => { sky.radioFails = 0; };
+  audio.play().catch(() => {});
+  $('radioTag').hidden = false;
+  $('radioTag').textContent = `📻 ${st.name}${st.state ? ` · ${st.state}` : ''} · ${sky.radio + 1}/${sky.stations.length} · R / ⏯ next`;
 }
 
 // ---------- the weather layer (OK / Enter) ----------
@@ -802,16 +996,17 @@ async function earthData() {
   const cats = {};
   for (const x of ev?.events || []) { const c = x.categories[0]?.title || 'Other'; cats[c] = (cats[c] || 0) + 1; }
   const big = quakes?.features?.length ? quakes.features.reduce((a, b) => (a.properties.mag > b.properties.mag ? a : b)) : null;
+  const launches = await nextLaunches().catch(() => []);
   return {
     rows: [
       `Earthquakes M4.5+, 24 h: ${quakes ? quakes.features.length : '—'}${big ? ` (biggest M${big.properties.mag.toFixed(1)}, ${big.properties.place})` : ''}`,
       `Space weather: Kp ${kpNow ?? '—'} ${kpNow >= 5 ? '(storm, auroras likely)' : '(quiet)'}`,
       `Solar wind ${speed ? fmt(speed) + ' km/s' : '—'} · X-ray ${flare}`,
       iss ? `Space station over ${iss.latitude.toFixed(1)}°, ${iss.longitude.toFixed(1)}° at ${fmt(iss.velocity)} km/h` : '',
-      `Natural events open now: ${ev ? ev.events.length : '—'}`,
+      `Natural events open now: ${ev ? ev.events.length : '—'}${Object.keys(cats).length ? ` (${Object.entries(cats).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, v]) => `${v} ${k.toLowerCase()}`).join(', ')})` : ''}`,
     ].filter(Boolean),
-    sideTitle: 'EVENTS BY KIND',
-    side: Object.entries(cats).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, v]) => [String(v), k]),
+    sideTitle: 'NEXT ROCKET LAUNCHES',
+    side: launches.length ? launches.map((r) => [countdown(r.net), r.name.replace(/\s*\|\s*/, ' · ').slice(0, 34)]) : [['—', 'launch list not available']],
   };
 }
 
@@ -831,7 +1026,9 @@ async function showData() {
   try {
     const d = level === 'here' || level === 'city' ? await cityData(focus(level)) : level === 'earth' ? await earthData() : await regionData(level);
     if (token !== dataToken) return;
-    $('rows').replaceChildren(...d.rows.map((r) => el('div', 'row', esc(r))));
+    $('rows').replaceChildren(...d.rows.map((r) => el('div', 'row', esc(r))), el('div', '', ''));
+    $('rows').lastChild.id = 'skyRows';
+    updateSkyRows();
     $('sideTitle').textContent = d.sideTitle;
     // values may start with a small sky picture (<svg>); everything else is escaped text
     $('sideRows').replaceChildren(...d.side.map(([k, v]) => {
@@ -898,6 +1095,12 @@ function drawCompass() {
     html += body.el >= 0 ? `<circle cx="${x}" cy="${y}" r="9" fill="${colour}" class="body"/>`
       : `<circle cx="${x}" cy="${y}" r="7" fill="none" stroke="${colour}" stroke-width="2" stroke-dasharray="3 3"/>`;
     html += `<text x="${x}" y="${y - 13}" class="bodyLabel" fill="${colour}">${label}</text>`;
+  }
+  for (const sat of sky.sats) {   // satellites above the horizon: small dots, the space station labelled
+    if (sat.el <= 0) continue;
+    const [x, y] = pos(sat.az, R * (90 - sat.el) / 90);
+    html += `<circle cx="${x}" cy="${y}" r="${sat.iss ? 5 : 2}" fill="${sat.iss ? '#ffd34d' : '#78e6ff'}"/>`;
+    if (sat.iss) html += `<text x="${x}" y="${y - 8}" class="bodyLabel" fill="#ffd34d">ISS</text>`;
   }
   html += `<circle cx="${C}" cy="${C}" r="3" class="hub"/>`;
   svg.innerHTML = html;
@@ -982,6 +1185,7 @@ document.addEventListener('keydown', (e) => {
   else if (k === 'ArrowRight') goView(state.view + 1);
   else if (k === 'ArrowLeft') goView(state.view - 1);
   else if (k === 'Enter' || k === 'w' || k === 'W') toggleWeather();
+  else if (k === 'r' || k === 'R' || k === 'MediaPlayPause' || k === 'MediaPlay') nextRadio();
   else if (k === 's' || k === 'S') { $('setup').hidden = false; $('setupCity').focus(); }
   else return;
   e.preventDefault();
@@ -1036,10 +1240,12 @@ async function boot() {
   fitScreen();
   addEventListener('resize', fitScreen);
   let last = performance.now();
-  const frame = (now) => { fitScreen(); scrollNews(now - last); last = now; requestAnimationFrame(frame); };
+  const frame = (now) => { fitScreen(); scrollNews(now - last); drawSky(now); last = now; requestAnimationFrame(frame); };
   requestAnimationFrame(frame);
   setInterval(tickClock, 250);
   setInterval(() => { if (state.place) showData(); }, 10 * 60e3);                 // fresh data every 10 minutes
+  setInterval(() => { if (state.place) loadFlights(); }, 15e3);                     // planes every 15 seconds
+  setInterval(() => { moveSatellites(); updateSkyRows(); drawCompass(); }, 5e3);   // satellites move fast
   setInterval(async () => { await loadNews(); if (state.place) renderNews(); }, 15 * 60e3);
   setInterval(() => {                                                                 // like a screensaver: next picture
     if (state.place && !state.weather && Date.now() - state.lastKey > 2 * 60e3 && state.views[state.view]?.kind !== 'loop') goView(state.view + 1);
@@ -1047,7 +1253,11 @@ async function boot() {
   if (!state.news) await loadNews();
   try {
     const place = await findPlace();
-    if (place || navigator.geolocation) { await start(place); drawCompass(); } else $('setup').hidden = false;
+    if (place || navigator.geolocation) {
+      await start(place); drawCompass();
+      loadFlights();
+      loadSatellites().catch((e) => console.warn('satellites', e));
+    } else $('setup').hidden = false;
   } catch (e) { status(e.message); $('setup').hidden = false; }
 }
 

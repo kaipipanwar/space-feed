@@ -35,6 +35,11 @@ https://kaipipanwar.github.io/space-feed/scope/
 - Live traffic needs a free TomTom key (developer.tomtom.com → "Maps and Traffic" key). Open the page once with
   `?tomtom=<key>`: it is kept only in that browser, never in this project.
 
+- Live flights (adsb.fi / adsb.lol), satellites passing over (CelesTrak orbits, satellite.js 7.1.0), rocket launches
+  (The Space Devs) and local radio (Radio Browser; R or the remote's play/pause). The flight services do not let web
+  pages read them and block cloud servers, so the Earth Scope TV app fetches them itself and, on a PC, a small helper
+  on that computer does (`earth-scope-tv/pc/earthscope_pc.pyw`, port 8771).
+
 ## Use it
 
 In Aerial Views: Media Sources → Custom feeds → add `https://kaipipanwar.github.io/space-feed/entries.json`.

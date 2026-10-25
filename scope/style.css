@@ -11,7 +11,7 @@ body { color: var(--text); font: 26px "Rajdhani", system-ui, sans-serif; }
 
 /* The fixed 1920 x 1080 screen, scaled by app.js to fit the window. */
 #screen { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; transform-origin: 0 0; overflow: hidden; }
-#camera, #sway, #stage, #stage img, #reticle, #weather, #heat { position: absolute; inset: 0; width: 1920px; height: 1080px; }
+#camera, #sway, #stage, #stage img, #reticle, #weather, #heat, #skyLayer { position: absolute; inset: 0; width: 1920px; height: 1080px; }
 /* The far-away camera: a slow drift with zoom, and a faster small sway on top (not at the Earth level). */
 #camera.drift { animation: drift 26s ease-in-out infinite alternate; }
 #camera.drift #sway { animation: sway 7.3s ease-in-out infinite alternate; }
@@ -35,7 +35,7 @@ h2 { font-size: 28px; margin-bottom: 8px; }
 .rule { height: 1px; background: var(--neon); opacity: 0.6; margin: 12px 0; }
 .row { font-size: 25px; line-height: 1.35; }
 .mono, #sideRows .row { font-family: "Share Tech Mono", monospace; font-size: 22px; }
-#sideRows .row b { color: var(--neon); font-weight: normal; display: inline-block; width: 120px; }
+#sideRows .row b { color: var(--neon); font-weight: normal; display: inline-block; min-width: 120px; padding-right: 8px; }
 #frameTime { margin-top: 10px; font: 34px "Share Tech Mono", monospace; color: var(--neon); }
 
 /* Animated clock: each digit slides when it changes. */
@@ -110,3 +110,8 @@ h2 { font-size: 28px; margin-bottom: 8px; }
 /* (the general "#stage img" rules are for the full-screen pictures: tiles keep their own place and stay visible) */
 #stage img.tile { position: absolute; inset: auto; opacity: 1; transition: none; object-fit: fill; }
 #radarTiles img.tile { opacity: 0.8; }
+
+/* Live sky rows (planes, satellites) and the radio tag */
+#rows .row.live { color: #9fe8ff; }
+#radioTag { position: absolute; left: 330px; bottom: 140px; font: 20px "Share Tech Mono", monospace; color: #9fe8ff;
+  background: var(--panel); padding: 4px 12px; border-radius: 8px; }

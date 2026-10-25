@@ -17,6 +17,7 @@
     <div id="stage"><img id="imgA" alt=""><img id="imgB" alt=""><div id="tiles"></div><img id="rain" alt=""><div id="radarTiles"></div></div>
     <canvas id="heat" width="1920" height="1080"></canvas>
     <canvas id="weather" width="1920" height="1080"></canvas>
+    <canvas id="skyLayer" width="1920" height="1080"></canvas>
     <canvas id="reticle" width="1920" height="1080"></canvas>
   </div></div>
 
@@ -44,6 +45,8 @@
   <div id="views"></div>
   <div id="status"></div>
   <div id="weatherTag" hidden></div>
+  <div id="radioTag" hidden></div>
+  <audio id="radio" preload="none"></audio>
 
   <div id="newsLine"><div id="newsLabel">NEWS</div><div id="newsWindow"><div id="newsText"></div></div></div>
 
@@ -55,7 +58,7 @@
     <input id="setupFacing" placeholder="e.g. 135" inputmode="numeric" autocomplete="off">
     <button>Go</button>
     <button type="button" id="setupGps">Use my location</button>
-    <p class="dim">Keys: ← → pictures · ↑ ↓ zoom out / in · OK weather · S change place</p>
+    <p class="dim">Keys: ← → pictures · ↑ ↓ zoom out / in · OK weather · R radio · S change place</p>
   </form>
 </div>
 <script src="app.js"></script>
